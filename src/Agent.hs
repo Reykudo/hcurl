@@ -24,6 +24,7 @@ import Data.RoundRobin (RoundRobin, newRoundRobin)
 import Data.Traversable
 import Extras
 import Foreign (freeStablePtr)
+import Foreign.Marshal (toBool)
 import Foreign.Ptr
 import GHC.Generics
 import Internal.MPSC
@@ -94,7 +95,7 @@ new :: Ptr CurlMulti -> IO AgentContext
 new multiPtr = do
     msgQueue <- initMPSCQ 100000
     uvLoopPtr <-
-        [C.block| uv_loop_t* { 
+        [C.block| uv_loop_t* {
         uv_loop_t *loop = malloc(sizeof(uv_loop_t));
         uv_loop_init(loop);
         return loop;
@@ -129,7 +130,7 @@ sendMessage ctx outerMessage = do
         }
         return isEnqueued;
     }|]
-    unless (toEnum . fromIntegral $ isEnqueued) do
+    unless (toBool isEnqueued) do
         throwIO QueueFull
 
 cancelRequest :: AgentContext -> RequestHandler -> IO ()
