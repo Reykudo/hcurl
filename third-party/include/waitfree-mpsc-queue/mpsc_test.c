@@ -8,11 +8,11 @@
 #include "mpscq.h"
 
 struct mpscq *queue;
-_Atomic int amount_produced = ATOMIC_VAR_INIT(0);
-_Atomic int amount_consumed = ATOMIC_VAR_INIT(0);
-_Atomic bool done = ATOMIC_VAR_INIT(false);
-_Atomic int retries = ATOMIC_VAR_INIT(0);
-_Atomic long long total = ATOMIC_VAR_INIT(0);
+_Atomic int amount_produced = 0;
+_Atomic int amount_consumed = 0;
+_Atomic bool done = false;
+_Atomic int retries = 0;
+_Atomic long long total = 0;
 #define NUM_ITEMS 10000
 #define NUM_THREADS 32
 
@@ -107,7 +107,7 @@ int main(int argc, char **argv)
 	pthread_join(consumer, NULL);
 
 	atomic_thread_fence(memory_order_seq_cst);
-	
+
 	for(int i=0;i<num_producers;i++) {
 		for(int j=0;j<NUM_ITEMS;j++) {
 			if(items[i][j].sent != 2) {
@@ -118,7 +118,6 @@ int main(int argc, char **argv)
 			assert(items[i][j].recv == 1);
 		}
 	}
-	
 	long ms = (end.tv_sec - start.tv_sec) * 1000;
 	ms += (end.tv_nsec - start.tv_nsec) / 1000000;
 

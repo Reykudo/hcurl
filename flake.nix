@@ -50,12 +50,16 @@
         };
 
         haskellProjects.default = {
-          autoWire = ["packages" "checks"];
+          autoWire = [
+            "packages"
+            "checks"
+          ];
           settings = {
             hurl = {self, ...}: {
               extraConfigureFlags = [
                 "--ghc-options=-lcurl"
                 "--ghc-options=-L${lib.makeLibraryPath [curl']}"
+                ''--c2hs-options="--cppopts=--std=gnu18"''
               ];
               custom = prev:
                 pkgs.haskell.lib.overrideCabal prev (drv: {

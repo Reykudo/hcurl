@@ -17,8 +17,8 @@ struct mpscq *mpscq_create(struct mpscq *n, size_t capacity)
 	} else {
 		n->flags = 0;
 	}
-	n->count = ATOMIC_VAR_INIT(0);
-	n->head = ATOMIC_VAR_INIT(0);
+	n->count = 0;
+	n->head = 0;
 	n->tail = 0;
 	n->buffer = calloc(capacity, sizeof(void *));
 	n->max = capacity;
