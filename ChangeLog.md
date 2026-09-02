@@ -1,3 +1,3 @@
-# Changelog for testy
+# Changelog for hcurl
 
 ## Unreleased changes

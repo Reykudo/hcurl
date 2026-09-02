@@ -1,4 +1,16 @@
-# HURL - Network client based on curl - WIP
+# HCurl - Network client based on libcurl - WIP
+
+Library modules use the `HCurl` namespace, for example `HCurl.Agent`,
+`HCurl.Request`, and `HCurl.Simple`.
+
+## Development
+
+The repository uses direnv and Nix to provide the complete Haskell and C toolchain:
+
+```console
+direnv allow
+nix build .#hcurl
+```
 
 ## License
 

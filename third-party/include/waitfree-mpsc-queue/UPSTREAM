@@ -1,0 +1,5 @@
+Repository: https://github.com/dbittman/waitfree-mpsc-queue
+Commit: 020ba2262c48b24828bed98e5cc63c5529ca24ce
+
+Local changes:
+- Replace ATOMIC_VAR_INIT assignments with C11 atomic assignments for GCC 15 compatibility.

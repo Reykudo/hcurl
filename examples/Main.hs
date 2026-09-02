@@ -1,10 +1,10 @@
 module Main where
 
-import Agent
 import Control.Monad.Trans.Resource (runResourceT)
-import Request
-import Simple
-import Types
+import HCurl.Agent as Agent
+import HCurl.Request as Request
+import HCurl.Simple
+import HCurl.Types
 
 main :: IO ()
 main = do
@@ -17,12 +17,12 @@ main = do
                 }
     agent <- Agent.spawnAgent conf
 
-    resp <- runResourceT $ httpLBS agent hurlGetRequest
+    resp <- runResourceT $ httpLBS agent hcurlGetRequest
 
     print resp
 
-hurlGetRequest :: Request
-hurlGetRequest =
+hcurlGetRequest :: Request
+hcurlGetRequest =
     Request
         { host = "https://example.com/"
         , timeoutMS = 0

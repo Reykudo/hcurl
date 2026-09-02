@@ -3,7 +3,6 @@
 
 module Main where
 
-import Agent
 import Control.Concurrent.Async (forConcurrently)
 import Control.DeepSeq
 import Control.Monad.Trans.Resource (runResourceT)
@@ -12,15 +11,16 @@ import Criterion.Types (Config (verbosity), Verbosity (..))
 import Data.Atomics.Counter
 import Data.ByteString
 import Data.ByteString.Lazy qualified as LBS
-import Internal.Raw
+import HCurl.Agent as Agent
+import HCurl.Internal.Raw
+import HCurl.Request as Request
+import HCurl.Response qualified as HCurl
+import HCurl.Simple
+import HCurl.Types
 import Network.HTTP.Client (Response (..))
 import Network.HTTP.Client qualified as HTTPClient
 import Network.HTTP.Simple qualified as HTTPSimple
 import PyF
-import Request
-import Response qualified as Hurl
-import Simple
-import Types
 import UnliftIO.Exception (try)
 
 instance NFData HTTPClient.HttpException where
@@ -38,8 +38,8 @@ main = do
                 , maxConnection = 1000
                 }
     agent <- Agent.spawnAgent conf
-    hurlCounterSuccess <- newCounter 0
-    hurlCounterFailure <- newCounter 0
+    hcurlCounterSuccess <- newCounter 0
+    hcurlCounterFailure <- newCounter 0
     httpCounterSuccess <- newCounter 0
     httpCounterFailure <- newCounter 0
     let criterionConfig =
@@ -49,12 +49,12 @@ main = do
     defaultMainWith
         criterionConfig
         [ bgroup
-            "hurl"
-            [ bench "1" $ nfIO (makeGetRequestHurl hurlCounterSuccess hurlCounterFailure agent)
-            , bench "10" $ nfIO (makeMultpleParallel 10 (makeGetRequestHurl hurlCounterSuccess hurlCounterFailure agent))
-            , bench "100" $ nfIO (makeMultpleParallel 100 (makeGetRequestHurl hurlCounterSuccess hurlCounterFailure agent))
-            , bench "1000" $ nfIO (makeMultpleParallel 1000 (makeGetRequestHurl hurlCounterSuccess hurlCounterFailure agent))
-            -- , bench "5000" $ nfIO (makeMultpleParallel 10000 (makeGetRequestHurl hurlCounter agent))
+            "hcurl"
+            [ bench "1" $ nfIO (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent)
+            , bench "10" $ nfIO (makeMultpleParallel 10 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
+            , bench "100" $ nfIO (makeMultpleParallel 100 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
+            , bench "1000" $ nfIO (makeMultpleParallel 1000 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
+            -- , bench "5000" $ nfIO (makeMultpleParallel 10000 (makeGetRequestHCurl hcurlCounter agent))
             ]
         , bgroup
             "http-client"
@@ -65,28 +65,28 @@ main = do
             -- , bench "5000" $ nfIO (makeMultpleParallel 10000 (makeGetRequestHTTPClient httpCounter))
             ]
         ]
-    hurlCounterSuccessVal <- readCounter hurlCounterSuccess
-    hurlCounterFailureVal <- readCounter hurlCounterFailure
+    hcurlCounterSuccessVal <- readCounter hcurlCounterSuccess
+    hcurlCounterFailureVal <- readCounter hcurlCounterFailure
     httpCounterSuccessVal <- readCounter httpCounterSuccess
     httpCounterFailureVal <- readCounter httpCounterFailure
     print
-        [fmt|hurl counter - success {hurlCounterSuccessVal} - failed  {hurlCounterFailureVal}
+        [fmt|hcurl counter - success {hcurlCounterSuccessVal} - failed  {hcurlCounterFailureVal}
     http counter - {httpCounterSuccessVal} - failed  {httpCounterFailureVal}|]
 
 makeMultpleParallel :: Int -> IO a -> IO [a]
 makeMultpleParallel n action =
     forConcurrently [1 .. n] $ const action
 
-makeGetRequestHurl :: AtomicCounter -> AtomicCounter -> Agent -> IO (Either CurlCode (Hurl.Response LBS.ByteString))
-makeGetRequestHurl sCounter fCounter agent = do
-    !res <- runResourceT $ httpLBS agent hurlGetRequest
+makeGetRequestHCurl :: AtomicCounter -> AtomicCounter -> Agent -> IO (Either CurlCode (HCurl.Response LBS.ByteString))
+makeGetRequestHCurl sCounter fCounter agent = do
+    !res <- runResourceT $ httpLBS agent hcurlGetRequest
     case res of
         Left _ -> incrCounter_ 1 fCounter
         Right _ -> incrCounter_ 1 sCounter
     pure $! res
 
-hurlGetRequest :: Request
-hurlGetRequest =
+hcurlGetRequest :: Request
+hcurlGetRequest =
     Request
         { host = "https://example.com/"
         , timeoutMS = 0

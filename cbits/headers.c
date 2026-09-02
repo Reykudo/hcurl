@@ -33,7 +33,7 @@ header_data_t* header_data_create(size_t initial_capacity) {
 
 size_t header_callback(char *buffer, size_t size, size_t nitems, void *userdata)
 {
-    size_t total_size = nitems; // 'size' is always 1 for headers
+    size_t total_size = size * nitems;
     header_data_t *hd = (header_data_t*)userdata;
 
     // Calculate the new required capacity (+1 for the separator)

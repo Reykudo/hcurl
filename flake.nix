@@ -1,5 +1,5 @@
 {
-  description = "Haskell curl bindings";
+  description = "HCurl - Haskell client based on libcurl";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs";
@@ -29,7 +29,7 @@
         pkgs,
         ...
       }: let
-        curl' = pkgs.curlHTTP3.override {
+        curl' = pkgs.curl.override {
           c-aresSupport = true;
           brotliSupport = true;
           zstdSupport = true;
@@ -54,8 +54,15 @@
             "packages"
             "checks"
           ];
+          devShell = {
+            benchmark = true;
+            extraLibraries = hp: {
+              inherit (hp) atomic-primops criterion http-client http-conduit;
+            };
+          };
           settings = {
-            hurl = {self, ...}: {
+            hcurl = {self, ...}: {
+              benchmark = true;
               extraConfigureFlags = [
                 "--ghc-options=-lcurl"
                 "--ghc-options=-L${lib.makeLibraryPath [curl']}"
@@ -72,7 +79,7 @@
           uv = pkgs.libuv;
           libcurl = curl';
         };
-        packages.default = self'.packages.hurl;
+        packages.default = self'.packages.hcurl;
         devShells.default = pkgs.mkShell {
           inputsFrom = [
             config.pre-commit.devShell
