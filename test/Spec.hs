@@ -27,6 +27,7 @@ import HCurl.Response (HttpParts (..), Response (..), StreamingResponse (..))
 import HCurl.Simple (httpLBS, initCurl)
 import HCurl.Streaming (
     BodyReader,
+    InvalidStreamBufferSize (..),
     StreamConfig (..),
     closeBody,
     httpStreaming,
@@ -60,6 +61,7 @@ main = withSocketsDo do
     runTest "streaming: scoped API closes the body on early return" $ testScopedEarlyReturn agent
     runTest "streaming: outer handler scope releases several abandoned requests" $ testHandlerScope agent
     runTest "streaming: blocked reader is woken when the stream is released" $ testBlockedReaderWoken agent
+    runTest "streaming: zero buffered chunks is rejected up front" $ testZeroBufferConfig agent
     managedAbandonAgent <- spawnManagedAgent (fastPolicy 2) defaultConfig
     runTest "managed: abandoned streams release their leases at scope exit" $ testManagedAbandonedLeases managedAbandonAgent
 
@@ -451,6 +453,20 @@ testHandlerScope agent = do
     assertEqual "read after handler exit" (Left AbortedByCallback) outcome
     withServer (sendFixedResponse "200 OK" [] "after-handler") \url ->
         runResourceT (httpLBS agent (requestFor url)) >>= assertBufferedOk "after handler scope" "after-handler"
+
+{- | A zero-chunk bounded queue is a configuration error and must be rejected
+before any transfer starts, not hang or crash inside the agent.
+-}
+testZeroBufferConfig :: Agent -> IO ()
+testZeroBufferConfig agent =
+    withServer (sendFixedResponse "200 OK" [] "x") \url -> do
+        outcome <-
+            try @InvalidStreamBufferSize $
+                runResourceT $
+                    httpStreamingWith StreamConfig{bufferedChunks = 0} agent (requestFor url)
+        case outcome of
+            Left InvalidStreamBufferSize -> pure ()
+            Right _ -> throwIO $ userError "expected InvalidStreamBufferSize for zero buffered chunks"
 
 {- | A thread parked in 'readBody' (no more data yet) must be woken with
 'Left AbortedByCallback' when the stream is released from another thread,
