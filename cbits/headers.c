@@ -33,16 +33,21 @@ header_data_t* header_data_create(size_t initial_capacity) {
 
 size_t header_callback(char *buffer, size_t size, size_t nitems, void *userdata)
 {
-    size_t total_size = size * nitems;
     header_data_t *hd = (header_data_t*)userdata;
 
     // Calculate the new required capacity (+1 for the separator)
+    if (size && nitems > ((size_t) -1 - hd->size - 1) / size) {
+        /* overflow: cannot represent these headers */
+        return 0;
+    }
+    size_t total_size = size * nitems;
     size_t required_capacity = hd->size + total_size + 1;
 
     // Resize the buffer if necessary
     if (required_capacity > hd->capacity)
     {
-        size_t new_capacity = (hd->capacity * 2 > required_capacity) ? hd->capacity * 2 : required_capacity;
+        size_t doubled = (hd->capacity > (size_t) -1 / 2) ? required_capacity : hd->capacity * 2;
+        size_t new_capacity = (doubled > required_capacity) ? doubled : required_capacity;
         char *new_buffer = realloc(hd->buffer, new_capacity);
         if (!new_buffer)
         {
