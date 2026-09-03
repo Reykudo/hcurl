@@ -11,7 +11,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Lazy qualified as BSL
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import HCurl.Agent (
     Agent,
     ManagedMetrics (..),
@@ -32,6 +32,7 @@ import HCurl.Streaming (
     httpStreaming,
     httpStreamingWith,
     readBody,
+    withHttpStreaming,
  )
 import HCurl.Types (AgentConfig (..), Body (Empty), HTTPMethod (Get), defaultConfig)
 import Network.Socket
@@ -55,6 +56,9 @@ main = withSocketsDo do
     runTest "managed: streaming leases drain and the pool shrinks under traffic" $ testManagedStreamingScaling streamingAgent
     metricsAgent <- spawnManagedAgent (fastPolicy 2) defaultConfig
     runTest "managed: metrics hook reports running agents and demand" $ testManagedMetricsHook metricsAgent
+    runTest "streaming: abandoned reader becomes a deterministic error after scope exit" $ testAbandonedScopeExit agent
+    runTest "streaming: scoped API closes the body on early return" $ testScopedEarlyReturn agent
+    runTest "streaming: outer handler scope releases several abandoned requests" $ testHandlerScope agent
 
 fastPolicy :: Int -> ManagedPolicy
 fastPolicy maxAgents =
@@ -365,6 +369,85 @@ waitForMetrics label recorder predicate = go 300
         if predicate snapshots
             then pure ()
             else threadDelay 10_000 >> go (remaining - 1)
+
+{- | A reader that is abandoned (never read, never closed) must become a
+deterministic error once the scope it was created in exits.
+-}
+testAbandonedScopeExit :: Agent -> IO ()
+testAbandonedScopeExit agent = do
+    started <- newEmptyMVar
+    releaseGate <- newEmptyMVar
+    readerVar <- newEmptyMVar
+    withServer (gatedResponder started releaseGate) \url -> do
+        scopeThread <-
+            async $ do
+                reader <-
+                    runResourceT do
+                        result <- httpStreaming agent (requestFor url)
+                        case result of
+                            Left curlCode -> liftIO . throwIO $ userError ("stream did not start: " <> show curlCode)
+                            Right StreamingResponse{body} -> pure body
+                putMVar readerVar reader
+        takeMVar started
+        wait scopeThread
+        reader <- takeMVar readerVar
+        outcome <- readBody reader
+        assertEqual "read after scope exit" (Left AbortedByCallback) outcome
+        putMVar releaseGate ()
+    withServer (sendFixedResponse "200 OK" [] "still-alive") \url ->
+        runResourceT (httpLBS agent (requestFor url)) >>= assertBufferedOk "after abandoned scope" "still-alive"
+
+{- | The scoped API must close the body the moment the callback returns, even
+when only the first chunk was read, and the agent stays usable.
+-}
+testScopedEarlyReturn :: Agent -> IO ()
+testScopedEarlyReturn agent = do
+    started <- newEmptyMVar
+    releaseGate <- newEmptyMVar
+    value <-
+        withServer (gatedResponder started releaseGate) \url -> do
+            result <-
+                runResourceT $
+                    withHttpStreaming agent (requestFor url) \response -> do
+                        first <- liftIO $ readBody response.body
+                        liftIO $ assertEqual "scoped first chunk" (Right $ Just (BS.replicate 100 97)) first
+                        pure (42 :: Int)
+            case result of
+                Left curlCode -> throwIO $ userError ("scoped stream did not start: " <> show curlCode)
+                Right scopedValue -> pure scopedValue
+    assertEqual "scoped callback value" 42 value
+    putMVar releaseGate ()
+    withServer (sendFixedResponse "200 OK" [] "still-alive") \url ->
+        runResourceT (httpLBS agent (requestFor url)) >>= assertBufferedOk "after scoped early return" "still-alive"
+
+{- | One outer handler scope runs several external requests and abandons a
+streaming body; when the handler's runResourceT ends, everything must be
+released and the escaped reader must fail deterministically.
+-}
+testHandlerScope :: Agent -> IO ()
+testHandlerScope agent = do
+    started <- newEmptyMVar
+    releaseGate <- newEmptyMVar
+    escaped <- newIORef Nothing
+    withServer (sendFixedResponse "200 OK" [] "buffered-body") \bufferedUrl ->
+        withServer (gatedResponder started releaseGate) \streamingUrl ->
+            runResourceT do
+                buffered <- httpLBS agent (requestFor bufferedUrl)
+                liftIO $ assertBufferedOk "handler buffered" "buffered-body" buffered
+                streamed <- httpStreaming agent (requestFor streamingUrl)
+                case streamed of
+                    Left curlCode -> liftIO . throwIO $ userError ("handler stream did not start: " <> show curlCode)
+                    Right StreamingResponse{body = reader} -> do
+                        liftIO $ writeIORef escaped (Just reader)
+                        liftIO $ takeMVar started
+                        liftIO $ putMVar releaseGate ()
+                        pure ()
+    escapedReader <- readIORef escaped
+    reader <- maybe (throwIO $ userError "no escaped reader captured") pure escapedReader
+    outcome <- readBody reader
+    assertEqual "read after handler exit" (Left AbortedByCallback) outcome
+    withServer (sendFixedResponse "200 OK" [] "after-handler") \url ->
+        runResourceT (httpLBS agent (requestFor url)) >>= assertBufferedOk "after handler scope" "after-handler"
 
 assertBufferedOk :: String -> ByteString -> Either CurlCode (Response BSL.ByteString) -> IO ()
 assertBufferedOk context expectedBody = \case

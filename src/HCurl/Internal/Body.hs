@@ -16,6 +16,7 @@ module HCurl.Internal.Body (
     defaultStreamConfig,
     finishBodyStream,
     installBodyStream,
+    markBodyStreamClosed,
     mkBodyReader,
     newBodyStreamState,
     publishBodyHead,
@@ -248,12 +249,20 @@ readBody BodyReader{streamState, resumeTransfer, releaseTransfer, readLock} =
             ReadEnd (BodyException exception) -> releaseTransfer >> throwIO exception
             ReadClosed -> pure $ Left AbortedByCallback
 
+{- | Mark the stream as closed and drop any buffered chunks.  This is the
+deterministic front door of every release path: after it, 'readBody' returns
+'Left AbortedByCallback' without touching already released resources.
+-}
+markBodyStreamClosed :: BodyStreamState -> IO ()
+markBodyStreamClosed BodyStreamState{chunks, closed} =
+    atomically do
+        writeTVar closed True
+        void $ flushTBQueue chunks
+
 {- | Stop a response early and release its libcurl resources.  It is safe to
 call this more than once.
 -}
 closeBody :: BodyReader -> IO ()
-closeBody BodyReader{streamState = BodyStreamState{chunks, closed}, releaseTransfer} = mask_ do
-    atomically do
-        writeTVar closed True
-        void $ flushTBQueue chunks
+closeBody BodyReader{streamState, releaseTransfer} = mask_ do
+    markBodyStreamClosed streamState
     releaseTransfer
