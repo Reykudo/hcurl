@@ -5,6 +5,7 @@
 typedef struct simple_string_s {
     char *ptr;
     size_t len;
+    size_t capacity;
 } simple_string_t;
 
 void init_simple_string(simple_string_t *str);

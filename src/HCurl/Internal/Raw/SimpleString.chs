@@ -4,6 +4,11 @@
 
 module HCurl.Internal.Raw.SimpleString where
 
+-- NOTE: changing the layout of simple_string_t in cbits/simple_string.h does
+-- not retrigger c2hs (Cabal does not track header dependencies), so the
+-- generated sizeOf here goes stale. After such a change run
+-- `touch src/HCurl/Internal/Raw/SimpleString.chs` (or clean rebuild).
+
 import Foreign.C.Types
 import Foreign.Ptr
 import Foreign.Storable
