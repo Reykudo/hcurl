@@ -132,7 +132,7 @@ library
       uv
 
   else
-    pkgconfig-depends: libcurl >=8.21 && <9, libuv >=1.52.1 && <2
+    pkgconfig-depends: libcurl, libuv
 
   build-tool-depends: c2hs:c2hs >=0.28.8 && <0.29
   build-depends:
