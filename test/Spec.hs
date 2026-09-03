@@ -59,6 +59,9 @@ main = withSocketsDo do
     runTest "streaming: abandoned reader becomes a deterministic error after scope exit" $ testAbandonedScopeExit agent
     runTest "streaming: scoped API closes the body on early return" $ testScopedEarlyReturn agent
     runTest "streaming: outer handler scope releases several abandoned requests" $ testHandlerScope agent
+    runTest "streaming: blocked reader is woken when the stream is released" $ testBlockedReaderWoken agent
+    managedAbandonAgent <- spawnManagedAgent (fastPolicy 2) defaultConfig
+    runTest "managed: abandoned streams release their leases at scope exit" $ testManagedAbandonedLeases managedAbandonAgent
 
 fastPolicy :: Int -> ManagedPolicy
 fastPolicy maxAgents =
@@ -448,6 +451,81 @@ testHandlerScope agent = do
     assertEqual "read after handler exit" (Left AbortedByCallback) outcome
     withServer (sendFixedResponse "200 OK" [] "after-handler") \url ->
         runResourceT (httpLBS agent (requestFor url)) >>= assertBufferedOk "after handler scope" "after-handler"
+
+{- | A thread parked in 'readBody' (no more data yet) must be woken with
+'Left AbortedByCallback' when the stream is released from another thread,
+instead of leaking a blocked thread forever.
+-}
+testBlockedReaderWoken :: Agent -> IO ()
+testBlockedReaderWoken agent = do
+    started <- newEmptyMVar
+    releaseGate <- newEmptyMVar
+    outcomeVar <- newEmptyMVar
+    withServer (gatedResponder started releaseGate) \url ->
+        runResourceT do
+            result <- httpStreaming agent (requestFor url)
+            case result of
+                Left curlCode -> liftIO . throwIO $ userError ("stream did not start: " <> show curlCode)
+                Right StreamingResponse{body = reader} -> do
+                    _ <- liftIO $ async $ drainResult reader >>= putMVar outcomeVar
+                    liftIO $ takeMVar started
+                    liftIO $ threadDelay 100_000
+                    liftIO $ closeBody reader
+                    outcome <- liftIO $ within 5_000_000 $ takeMVar outcomeVar
+                    liftIO $ assertEqual "blocked reader woken by close" (Left AbortedByCallback) outcome
+    withServer (sendFixedResponse "200 OK" [] "still-alive") \url ->
+        runResourceT (httpLBS agent (requestFor url)) >>= assertBufferedOk "after blocked reader release" "still-alive"
+  where
+    drainResult :: BodyReader -> IO (Either CurlCode ())
+    drainResult reader =
+        readBody reader >>= \case
+            Left curlCode -> pure $ Left curlCode
+            Right Nothing -> pure $ Right ()
+            Right (Just _) -> drainResult reader
+
+{- | Abandoned streams whose scope exits must release their lease on the
+managed pool: otherwise the pool could never drain back to the minimum,
+because the abandoned worker would look busy forever.
+-}
+testManagedAbandonedLeases :: Agent -> IO ()
+testManagedAbandonedLeases agent = do
+    realCapabilities <- getNumCapabilities
+    forM_ [1 .. 4] $ \_ -> do
+        started <- newEmptyMVar
+        releaseGate <- newEmptyMVar
+        withServer (gatedResponder started releaseGate) \url ->
+            runResourceT do
+                result <- httpStreaming agent (requestFor url)
+                case result of
+                    Left curlCode -> liftIO . throwIO $ userError ("abandoned stream did not start: " <> show curlCode)
+                    Right _ -> liftIO $ takeMVar started
+        putMVar releaseGate ()
+    when (realCapabilities >= 2) do
+        start1 <- newEmptyMVar
+        start2 <- newEmptyMVar
+        releaseGate1 <- newEmptyMVar
+        releaseGate2 <- newEmptyMVar
+        let expected = BS.replicate 100 97 <> BS.replicate 100 98
+        request1 <- async $ bufferedOne start1 releaseGate1
+        request2 <- async $ bufferedOne start2 releaseGate2
+        takeMVar start1
+        takeMVar start2
+        probe <- withServer (sendFixedResponse "200 OK" [] "probe") \url ->
+            runResourceT $ httpLBS agent (requestFor url)
+        assertBufferedOk "lease probe" "probe" probe
+        waitForWorkerCount "pool grows after abandoned streams" agent (Just 2)
+        putMVar releaseGate1 ()
+        putMVar releaseGate2 ()
+        result1 <- wait request1
+        result2 <- wait request2
+        forM_ [result1, result2] $ \result -> assertBufferedOk "gated after abandoned" expected result
+        traffic <- async $ lightTraffic agent 2_400_000
+        waitForWorkerCount "pool drains despite abandoned streams" agent (Just 1)
+        wait traffic
+  where
+    bufferedOne started releaseGate =
+        withServer (gatedResponder started releaseGate) \url ->
+            runResourceT $ httpLBS agent (requestFor url)
 
 assertBufferedOk :: String -> ByteString -> Either CurlCode (Response BSL.ByteString) -> IO ()
 assertBufferedOk context expectedBody = \case

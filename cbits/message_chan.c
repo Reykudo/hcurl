@@ -55,6 +55,13 @@ void async_check_outer_messages(uv_async_t *async_handle) {
                     cancel_data->active = false;
                     cancel_data->curl_code = CURLE_ABORTED_BY_CALLBACK;
                     wake_up_waker(&cancel_data->waker);
+                } else {
+                    /* The easy was never added to the multi handle (Execute
+                     * has not been processed yet, or failed). Wake its owner
+                     * with an aborted result so a waiting completion worker
+                     * cannot hang. */
+                    cancel_data->curl_code = CURLE_ABORTED_BY_CALLBACK;
+                    wake_up_waker(&cancel_data->waker);
                 }
                 wake_up_waker(&message->cancel_payload.waker);
                 break;
