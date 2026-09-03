@@ -9,6 +9,11 @@ import HCurl.Internal.Raw.Curl
 
 {# pointer *hs_easy_data_t as EasyData foreign newtype #}
 
+-- | The stable pointer stored in @waker.mvar@ is intentionally never freed:
+-- hs_try_putmvar delivers the wake-up asynchronously, and freeing the pointer
+-- after observing the completion (or reusing the pinned slot) crashes the RTS
+-- under concurrency. GHC 9.10 provides no cleanup API for this primitive, and
+-- GHC's own hs_try_putmvar sample leaks the pointer the same way.
 mkEasyData :: MVar () -> IO EasyData
 mkEasyData waker = do
   (cap, _locked) <- threadCapability =<< myThreadId
