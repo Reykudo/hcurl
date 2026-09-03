@@ -20,6 +20,7 @@ import HCurl.Internal.Metrics
 import HCurl.Internal.Options
 import HCurl.Internal.Raw
 import HCurl.Internal.Raw.Extras
+import HCurl.Internal.Raw.Headers (HeadersData)
 import HCurl.Internal.Raw.Metrics (CurlMetricsContext (CurlMetricsContext))
 import HCurl.Internal.Raw.SimpleString
 import HCurl.Internal.Slist
@@ -163,8 +164,8 @@ setHeaders headers (CurlEasy easyPtr) = case headers of
         liftIO [CU.block|void { curl_easy_setopt($(CURL* easyPtr), CURLOPT_HTTPHEADER, $fptr-ptr:(curl_slist_t* slistFPtr)); }|]
         pure mempty
 
-initRequest :: (MonadResource m) => Request -> CurlEasy -> m RequestHandler
-initRequest request@Request{..} easy = do
+initRequestWith :: (MonadResource m) => (CurlEasy -> HeadersData -> m (response, [ReleaseKey])) -> Request -> CurlEasy -> m (RequestHandler response)
+initRequestWith setResponseTarget request@Request{..} easy = do
     setDefaultHTTPOptions easy
     setHTTPMethod method easy
     setRequestOpts request easy
@@ -173,16 +174,21 @@ initRequest request@Request{..} easy = do
     setRequestBody request easy
     releaseKeySlist <- setHeaders headers easy
     (doneRequest, easyData) <- setEasyData easy
-    responseSimpleString <- setSimpleStringResponse easy
     setUserOptions extraOptions easy
+    (responseTarget, responseResources) <- setResponseTarget easy headerData
     pure
         RequestHandler
             { easy
             , easyData
             , requestBody = body
             , doneRequest
-            , responseSimpleString
+            , responseTarget
             , metricsContext
-            , resources = releaseKeySlist
+            , resources = responseResources <> releaseKeySlist
             , requestHeaders = headerData
             }
+
+initRequest :: (MonadResource m) => Request -> CurlEasy -> m (RequestHandler SimpleStringPtr)
+initRequest = initRequestWith \easy _headers -> do
+    responseSimpleString <- setSimpleStringResponse easy
+    pure (responseSimpleString, [])

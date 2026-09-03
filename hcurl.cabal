@@ -72,6 +72,7 @@ library
   exposed-modules:
     HCurl.Agent
     HCurl.Extras
+    HCurl.Internal.Body
     HCurl.Internal.Callbacks
     HCurl.Internal.Easy
     HCurl.Internal.Headers
@@ -92,11 +93,13 @@ library
     HCurl.Internal.Raw.MPSC
     HCurl.Internal.Raw.SimpleString
     HCurl.Internal.Raw.UV
+    HCurl.Internal.Response
     HCurl.Internal.Slist
     HCurl.PyFCustom
     HCurl.Request
     HCurl.Response
     HCurl.Simple
+    HCurl.Streaming
     HCurl.Types
 
   autogen-modules:    Paths_hcurl
@@ -147,6 +150,7 @@ library
     , roundRobin        >=0.1.2    && <0.2
     , singletons        >=3.0.4    && <3.1
     , singletons-th     >=3.4      && <3.6
+    , stm               >=2.5.3    && <2.6
     , template-haskell  >=2.22     && <2.25
     , unliftio          >=0.2.25.1 && <0.3
 
@@ -163,8 +167,12 @@ test-suite hcurl-test
     -with-rtsopts=-N
 
   build-depends:
-    , base   >=4.20.2 && <5
+    , async       >=2.2.6  && <2.3
+    , base        >=4.20.2 && <5
+    , bytestring  >=0.12.2 && <0.13
     , hcurl
+    , network     >=3.2    && <3.3
+    , resourcet   >=1.3    && <1.4
 
 executable hcurl-example
   import:          warnings, extensions

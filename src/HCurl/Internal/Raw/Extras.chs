@@ -19,6 +19,7 @@ mkEasyData waker = do
      {#set hs_easy_data_t.waker.mvar#} easyDataPtr (castStablePtrToPtr wakerSPtr)
      {#set hs_easy_data_t.waker.waked#} easyDataPtr False
      {#set hs_easy_data_t.waker.capability#} easyDataPtr (fromIntegral cap)
+     {#set hs_easy_data_t.active#} easyDataPtr False
   pure $ EasyData easyDataFPtr
 
 getCurlCode :: EasyData -> IO CurlCode

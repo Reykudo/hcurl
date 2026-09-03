@@ -6,7 +6,6 @@ module HCurl.Internal.Headers where
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
-import Data.ByteString.Unsafe qualified as BSU
 import Data.CaseInsensitive qualified as CI
 import Data.Maybe
 import Foreign
@@ -61,5 +60,5 @@ extractHeaders :: HeadersData -> IO [Header]
 extractHeaders (HeadersData fptr) = withForeignPtr fptr \ptr -> do
     len <- [C.exp|size_t { $(header_data_t* ptr)->size }|]
     strPtr <- [C.exp|char* { $(header_data_t* ptr)->buffer }|]
-    bs <- BSU.unsafePackCStringLen (strPtr, fromIntegral len)
+    bs <- BS.packCStringLen (strPtr, fromIntegral len)
     pure $ parseHeaders bs

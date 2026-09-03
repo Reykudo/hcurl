@@ -14,7 +14,6 @@ import HCurl.Internal.Raw
 import HCurl.Internal.Raw.Extras
 import HCurl.Internal.Raw.Headers
 import HCurl.Internal.Raw.Metrics (CurlMetricsContext)
-import HCurl.Internal.Raw.SimpleString (SimpleStringPtr)
 import HCurl.Types
 
 -- | TODO async request body
@@ -43,13 +42,13 @@ data LowSpeedLimit = LowSpeedLimit
     deriving anyclass (NFData)
 
 -- TODO: support streaming request body
-data RequestHandler = RequestHandler
+data RequestHandler response = RequestHandler
     { easy :: !CurlEasy
     , easyData :: !EasyData
     , doneRequest :: !(MVar ())
     , requestHeaders :: HeadersData
     , requestBody :: !Body
-    , responseSimpleString :: !SimpleStringPtr
+    , responseTarget :: !response
     , metricsContext :: !CurlMetricsContext
     , resources :: ![ReleaseKey]
     }

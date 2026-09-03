@@ -15,7 +15,11 @@ import Control.Concurrent.MVar
 
 {#pointer *outer_message_t as InternalOuterMessage newtype #}
 
-data OuterMessage = Execute (Ptr CurlEasy) | CancelRequest (Ptr CurlEasy) (MVar ())
+data OuterMessage
+    = Execute (Ptr CurlEasy)
+    | CancelRequest (Ptr CurlEasy) (MVar ())
+    | ResumeRequest (Ptr CurlEasy)
+    | StopAgent
 
 toInnerOuterMessage :: OuterMessage -> IO InternalOuterMessage
 toInnerOuterMessage msg = do
@@ -33,4 +37,9 @@ toInnerOuterMessage msg = do
             {#set outer_message_t.cancel_payload.waker.mvar#} cMsg (castStablePtrToPtr wakerSPtr)
             {#set outer_message_t.cancel_payload.waker.waked#} cMsg False
             {#set outer_message_t.cancel_payload.waker.capability#} cMsg (fromIntegral cap)
+        ResumeRequest easy -> do
+            {#set outer_message_t.tag#} cMsg (fromIntegral . fromEnum $ InternalResumeRequest)
+            {#set outer_message_t.resume_payload.easy#} cMsg (castPtr easy)
+        StopAgent -> do
+            {#set outer_message_t.tag#} cMsg (fromIntegral . fromEnum $ InternalStopAgent)
     pure cMsg

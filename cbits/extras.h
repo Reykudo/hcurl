@@ -15,6 +15,7 @@ typedef struct hs_waker_s {
 typedef struct hs_easy_data_s {
     CURLcode curl_code;
     hs_waker_t waker;
+    bool active;
 } hs_easy_data_t;
 
 size_t ignore_body_writefunc(void *ptr, size_t size, size_t nmemb, void *userp);

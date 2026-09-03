@@ -37,6 +37,7 @@ void check_multi_info(CURLM *multi) {
                 curl_easy_getinfo(easy_handle, CURLINFO_PRIVATE, &hs_easy_data);
 
                 hs_easy_data->curl_code = message->data.result;
+                hs_easy_data->active = false;
                 
                 curl_multi_remove_handle(multi, easy_handle);
                 wake_up_waker(&hs_easy_data->waker);
@@ -139,6 +140,7 @@ void bind_uv_curl_multi(uv_loop_t *loop, CURLM *multi) {
 
     multi_context->multi = multi;
     multi_context->loop = loop;
+    loop->data = multi_context;
 
     uv_timer_init(loop, &multi_context->timer);
     multi_context->timer.data = multi;
@@ -148,4 +150,31 @@ void bind_uv_curl_multi(uv_loop_t *loop, CURLM *multi) {
 
     curl_multi_setopt(multi, CURLMOPT_TIMERFUNCTION, curl_timer_function);
     curl_multi_setopt(multi, CURLMOPT_TIMERDATA, multi_context);
+}
+
+static void close_handle_cb(uv_handle_t *handle, void *arg) {
+    (void) arg;
+    if (!uv_is_closing(handle)) {
+        uv_close(handle, NULL);
+    }
+}
+
+void agent_shutdown(uv_loop_t *loop, uv_async_t *async, CURLM *multi) {
+    if (multi) {
+        curl_multi_cleanup(multi);
+    }
+    if (async && !uv_is_closing((uv_handle_t *) async)) {
+        uv_close((uv_handle_t *) async, NULL);
+    }
+    uv_walk(loop, close_handle_cb, NULL);
+    while (uv_loop_alive(loop)) {
+        uv_run(loop, UV_RUN_NOWAIT);
+    }
+    uv_loop_close(loop);
+    free(loop->data);
+    if (async) {
+        free(async->data);
+    }
+    free(async);
+    free(loop);
 }

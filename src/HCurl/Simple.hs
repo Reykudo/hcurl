@@ -15,17 +15,17 @@ import Language.C.Inline qualified as C
 
 import HCurl.Internal.Raw
 
-import Data.RoundRobin
+import Data.Foldable (traverse_)
 import HCurl.Agent
 import HCurl.Extras
 import HCurl.Internal.Easy
-import HCurl.Internal.Headers
 import HCurl.Internal.Metrics
 import HCurl.Internal.Raw.Extras (getCurlCode)
 import HCurl.Internal.Raw.MPSC (OuterMessage (Execute))
+import HCurl.Internal.Raw.SimpleString (SimpleStringPtr)
+import HCurl.Internal.Response (getHttpParts)
 import HCurl.Request
 import HCurl.Response
-import Language.C.Inline.Unsafe qualified as CU
 import UnliftIO
 import UnliftIO.Resource
 
@@ -40,29 +40,19 @@ C.include "HsFFI.h"
 initCurl :: IO ()
 initCurl = [C.block|void { curl_global_init(CURL_GLOBAL_DEFAULT); }|]
 
-performRequest :: AgentHandle -> RequestHandler -> IO (Either CurlCode (Response BSL.ByteString))
+performRequest :: AgentHandle -> RequestHandler SimpleStringPtr -> IO (Either CurlCode (Response BSL.ByteString))
 performRequest agent reqHandler = do
     let CurlEasy easyPtr = reqHandler.easy
     sendMessage agent.agentContext $ Execute easyPtr
     readMVar reqHandler.doneRequest
+    !responseBS <- simpleStringToBS reqHandler.responseTarget
     getCurlCode reqHandler.easyData >>= \case
         Ok -> do
-            !responseBS <- simpleStringToBS reqHandler.responseSimpleString
-            code <-
-                [CU.block|long {
-                     long http_code = 0;
-                     curl_easy_getinfo($(CURL* easyPtr), CURLINFO_RESPONSE_CODE, &http_code);
-                     return http_code;
-                 }|]
             metrics <- extractMetrics reqHandler.metricsContext
-            headers <- extractHeaders reqHandler.requestHeaders
+            info <- getHttpParts reqHandler.easy reqHandler.requestHeaders
             pure . Right $!
                 Response
-                    { info =
-                        HttpParts
-                            { statusCode = fromIntegral code
-                            , headers = headers
-                            }
+                    { info
                     , body = BSL.fromStrict responseBS
                     , metrics
                     }
@@ -70,11 +60,15 @@ performRequest agent reqHandler = do
 
 httpLBS :: (MonadResource m, MonadUnliftIO m) => Agent -> Request -> m (Either CurlCode (Response BSL.ByteString))
 httpLBS agent request = do
-    (releaseKeyEasy, easy) <- allocateEasy
-    req <- initRequest request easy
-    agentHandle <- case agent of
-        Single agentHandle -> pure agentHandle
-        Threaded rr -> liftIO $ select rr
-    res <- liftIO (performRequest agentHandle req) -- `onException` liftIO (cancelRequest agent.agentContext req)
-    release releaseKeyEasy
-    pure res
+    lease <- liftIO $ acquireLease agent
+    outcome <-
+        ( do
+            (releaseKeyEasy, easy) <- allocateEasy
+            req <- initRequest request easy
+            res <- liftIO $ performRequest lease.leaseAgentHandle req `onException` cancelRequest lease.leaseAgentHandle.agentContext req
+            traverse_ release req.resources
+            release releaseKeyEasy
+            pure res
+        )
+            `finally` liftIO lease.leaseDone
+    pure outcome

@@ -22,7 +22,7 @@ static void destroy_socket_context_cb(uv_handle_t *handle);
 
 static void destroy_socket_context(socket_context_t *context);
 
-static void check_multi_info(CURLM *multi);
+void check_multi_info(CURLM *multi);
 
 static void socket_callback(uv_poll_t *poll, int status, int events);
 
@@ -36,3 +36,9 @@ static int curl_socket_function(CURL *easy, curl_socket_t socket_fd, int action,
                                 socket_context_t *socket_context_p);
 
 void bind_uv_curl_multi(uv_loop_t *loop, CURLM *multi);
+
+/* Tear down an idle agent loop after uv_run returned (uv_stop was issued).
+ * Closes remaining uv handles, cleans up the multi handle and frees the
+ * loop. The queue is owned by Haskell (finalizer) and must not be freed
+ * here. */
+void agent_shutdown(uv_loop_t *loop, uv_async_t *async, CURLM *multi);
