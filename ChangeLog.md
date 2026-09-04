@@ -53,3 +53,6 @@
   duplicate IDs, and clean agent teardown.
 - Corrected the Cabal license metadata to match the repository's existing
   Apache-2.0-or-MIT license files and README grant.
+- Store managed-worker primitive counters in `IORefU` while retaining boxed
+  references where atomic `Word64`, `Bool`, or higher-level values are needed.
+  The existing managed-state `MVar` remains the synchronization boundary.

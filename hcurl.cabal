@@ -167,6 +167,7 @@ library
     , singletons        >=3.0.4    && <3.1
     , singletons-th     >=3.4      && <3.6
     , template-haskell  >=2.22     && <2.25
+    , unboxed-ref       >=0.4.0.0  && <0.5
     , unliftio          >=0.2.25.1 && <0.3
 
 test-suite hcurl-test
@@ -182,12 +183,13 @@ test-suite hcurl-test
     -with-rtsopts=-N
 
   build-depends:
-    , async       >=2.2.6  && <2.3
-    , base        >=4.20.2 && <5
-    , bytestring  >=0.12.2 && <0.13
+    , async        >=2.2.6   && <2.3
+    , base         >=4.20.2  && <5
+    , bytestring   >=0.12.2  && <0.13
     , hcurl
-    , network     >=3.2    && <3.3
-    , resourcet   >=1.3    && <1.4
+    , network      >=3.2     && <3.3
+    , resourcet    >=1.3     && <1.4
+    , unboxed-ref  >=0.4.0.0 && <0.5
 
 executable hcurl-example
   import:          warnings, extensions

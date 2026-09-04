@@ -4,7 +4,7 @@ module Main (main) where
 
 import Control.Concurrent (getNumCapabilities, threadDelay)
 import Control.Concurrent.Async (Async, async, cancel, forConcurrently, poll, wait, waitCatch)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar, takeMVar, tryPutMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, putMVar, readMVar, takeMVar, tryPutMVar)
 import Control.Exception (Exception, MaskingState (Unmasked), SomeException, bracket, finally, getMaskingState, throwIO, try)
 import Control.Monad (forM_, replicateM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
@@ -15,6 +15,7 @@ import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Lazy qualified as BSL
 import Data.Char (toLower)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef.Unboxed (atomicAddCounter, newCounter)
 import Data.List (isInfixOf)
 import Data.List.NonEmpty qualified as NonEmpty
 import HCurl.Internal.Agent (
@@ -30,6 +31,7 @@ import HCurl.Internal.Agent (
     TransferIdExhausted,
     agentWorkerCount,
     closeAgent,
+    markWorkerQuiescing,
     newTransferId,
     registerManagedMetrics,
     sendMessage,
@@ -654,11 +656,11 @@ testManagedMetricsHook :: Agent -> IO ()
 testManagedMetricsHook agent = do
     realCapabilities <- getNumCapabilities
     recorder <- newIORef []
-    hookCalls <- newIORef (0 :: Int)
+    hookCalls <- newCounter 0
     controllerMaskingState <- newEmptyMVar
     registerManagedMetrics agent $ \snapshot -> do
         atomicModifyIORef' recorder (\snapshots -> (snapshot : snapshots, ()))
-        call <- atomicModifyIORef' hookCalls $ \count -> let next = count + 1 in (next, next)
+        call <- atomicAddCounter hookCalls 1
         when (call >= 2) $ getMaskingState >>= void . tryPutMVar controllerMaskingState
     within 2_000_000 (takeMVar controllerMaskingState)
         >>= assertEqual "managed metrics hook masking state" Unmasked
@@ -1130,14 +1132,15 @@ testManagedCloseOwnsRetiringWorkers = do
             case state.msWorkers of
                 worker : _ -> pure worker
                 [] -> throwIO $ userError "managed agent started without a worker"
-        calls <- newIORef (0 :: Int)
+        calls <- newCounter 0
         hookEntered <- newEmptyMVar
         registerManagedMetrics agent $ \_ -> do
-            call <- atomicModifyIORef' calls $ \count -> let next = count + 1 in (next, next)
+            call <- atomicAddCounter calls 1
             when (call >= 2) do
                 void $ tryPutMVar hookEntered ()
                 void $ takeMVar releaseHook
-        writeIORef original.mwQuiescing True
+        modifyMVar_ managed.maState \state ->
+            markWorkerQuiescing original >> pure state
         within 2_000_000 $ takeMVar hookEntered
         within 2_000_000 $ closeAgent agent
         poll original.mwHandle.agentThreadId >>= \case
@@ -1154,10 +1157,10 @@ testManagedCloseBlockedHook = do
             Managed value -> pure value
             _ -> throwIO $ userError "spawnManagedAgent returned a non-managed agent"
         controller <- readMVar managed.maController
-        calls <- newIORef (0 :: Int)
+        calls <- newCounter 0
         hookEntered <- newEmptyMVar
         registerManagedMetrics agent $ \_ -> do
-            call <- atomicModifyIORef' calls $ \count -> let next = count + 1 in (next, next)
+            call <- atomicAddCounter calls 1
             when (call >= 2) do
                 void $ tryPutMVar hookEntered ()
                 void $ takeMVar releaseHook

@@ -10,7 +10,7 @@ import Control.Exception
 import Control.Monad (unless, void)
 import Control.Monad.Trans.Resource
 import Data.Foldable (traverse_)
-import Data.IORef
+import Data.IORef (atomicModifyIORef', newIORef)
 import GHC.Exts (touch#)
 import GHC.IO (IO (IO))
 import HCurl.Internal.Agent

@@ -21,7 +21,9 @@ import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (filterM, forM_, forever, unless, when)
 import Data.Either (lefts)
-import Data.IORef
+import Data.IORef (IORef)
+import Data.IORef qualified as Boxed
+import Data.IORef.Unboxed (IORefU, modifyIORefU, newIORefU, readIORefU, writeIORefU)
 import Data.List (minimumBy)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NonEmpty
@@ -155,11 +157,13 @@ defaultManagedPolicy = do
             , mpKillCooldownMicros = 5_000_000
             }
 
+-- Active count and utilization are unboxed storage, not synchronization
+-- primitives. Every access is serialized by the owning ManagedAgent.maState.
 data ManagedWorker = ManagedWorker
     { mwId :: !Int
     , mwHandle :: !AgentHandle
-    , mwActive :: !(IORef Int)
-    , mwUtilization :: !(IORef Double)
+    , mwActive :: !(IORefU Int)
+    , mwUtilization :: !(IORefU Double)
     , mwQuiescing :: !(IORef Bool)
     }
 
@@ -235,7 +239,7 @@ spawnManagedAgent rawPolicy config = mask_ do
                     | (index, agentHandle) <- zip [0 ..] handles
                     ]
             state <- newMVar $ ManagedState workers 0 0 0 policy config startCount False
-            hook <- newIORef $ \_ -> pure ()
+            hook <- Boxed.newIORef $ \_ -> pure ()
             controllerSlot <- newEmptyMVar
             closeState <- newOnceState
             let managedAgent = ManagedAgent state hook controllerSlot closeState
@@ -264,7 +268,7 @@ registration.
 registerManagedMetrics :: Agent -> MetricsHook -> IO ()
 registerManagedMetrics agent hook = case agent of
     Managed managedAgent -> do
-        writeIORef managedAgent.maHook hook
+        Boxed.writeIORef managedAgent.maHook hook
         snapshot <- metricsOf =<< readMVar managedAgent.maState
         runHook managedAgent.maHook snapshot
     _ -> throwIO $ userError "metrics hook requires a Managed agent"
@@ -287,7 +291,7 @@ metricsOf managedState = do
 
 runHook :: IORef MetricsHook -> ManagedMetrics -> IO ()
 runHook hookRef snapshot = do
-    hook <- readIORef hookRef
+    hook <- Boxed.readIORef hookRef
     ignoreSynchronousException $ hook snapshot
 
 ignoreSynchronousException :: IO () -> IO ()
@@ -299,7 +303,13 @@ ignoreSynchronousException action =
 
 newManagedWorker :: Int -> AgentHandle -> IO ManagedWorker
 newManagedWorker index agentHandle =
-    ManagedWorker index agentHandle <$> newIORef 0 <*> newIORef 0 <*> newIORef False
+    ManagedWorker index agentHandle <$> newIORefU 0 <*> newIORefU 0 <*> Boxed.newIORef False
+
+workerIsQuiescing :: ManagedWorker -> IO Bool
+workerIsQuiescing worker = Boxed.readIORef worker.mwQuiescing
+
+markWorkerQuiescing :: ManagedWorker -> IO ()
+markWorkerQuiescing worker = Boxed.writeIORef worker.mwQuiescing True
 
 clampPolicy :: Int -> ManagedPolicy -> ManagedPolicy
 clampPolicy realCapabilities policy =
@@ -331,9 +341,9 @@ selectableWorkers managedState =
     filterM isSelectable managedState.msWorkers
   where
     isSelectable worker = do
-        quiescing <- readIORef worker.mwQuiescing
+        quiescing <- workerIsQuiescing worker
         running <- agentHandleRunning worker.mwHandle
-        unless running $ writeIORef worker.mwQuiescing True
+        unless running $ markWorkerQuiescing worker
         pure $ not quiescing && running
 
 agentHandleRunning :: AgentHandle -> IO Bool
@@ -358,8 +368,8 @@ controllerTick policy now managedState
     | otherwise = do
         refreshWorkerStates managedState.msWorkers
         actives <- forM managedState.msWorkers $ \worker -> do
-            active <- readIORef worker.mwActive
-            quiescing <- readIORef worker.mwQuiescing
+            active <- readIORefU worker.mwActive
+            quiescing <- workerIsQuiescing worker
             pure (worker, active, quiescing)
         let alpha = policy.mpEwmaAlpha
             selectable = [(worker, active) | (worker, active, quiescing) <- actives, not quiescing]
@@ -367,9 +377,9 @@ controllerTick policy now managedState
             sampleLoad = fromIntegral (sum (map snd selectable)) :: Double
             ewmaLoad = managedState.msLoad + alpha * (sampleLoad - managedState.msLoad)
         forM_ actives $ \(worker, active, _) -> do
-            current <- readIORef worker.mwUtilization
+            current <- readIORefU worker.mwUtilization
             let busy = if active > 0 then 1 else 0 :: Double
-            writeIORef worker.mwUtilization $ current + alpha * (busy - current)
+            writeIORefU worker.mwUtilization $ current + alpha * (busy - current)
         let withLoad = managedState{msLoad = ewmaLoad}
             perWorker = if workerCount == 0 then 0 else ewmaLoad / fromIntegral workerCount
             killCooldownNs = microsToNanos policy.mpKillCooldownMicros
@@ -390,14 +400,14 @@ controllerTick policy now managedState
             then do
                 selectable <- selectableWorkers state
                 ranked <- forM selectable $ \worker -> do
-                    active <- readIORef worker.mwActive
-                    utilization <- readIORef worker.mwUtilization
+                    active <- readIORefU worker.mwActive
+                    utilization <- readIORefU worker.mwUtilization
                     pure (worker, active, utilization)
                 case ranked of
                     [] -> pure state
                     _ -> do
                         let (victim, _, _) = minimumBy (comparing (\(_, active, utilization) -> (active, utilization))) ranked
-                        writeIORef victim.mwQuiescing True
+                        markWorkerQuiescing victim
                         pure state{msShrinkStreak = 0}
             else pure state{msShrinkStreak = streak}
 
@@ -408,7 +418,7 @@ refreshWorkerStates :: [ManagedWorker] -> IO ()
 refreshWorkerStates workers =
     forM_ workers \worker -> do
         running <- agentHandleRunning worker.mwHandle
-        unless running $ writeIORef worker.mwQuiescing True
+        unless running $ markWorkerQuiescing worker
 
 -- Keep the policy's minimum available after a reactor exits unexpectedly.
 -- Synchronous spawn failures are retried on the next controller tick; an
@@ -437,8 +447,8 @@ and to the next controller tick if the retiring thread is interrupted.
 drainFinished :: ManagedState -> IO (ManagedState, [ManagedWorker])
 drainFinished managedState = do
     drained <- forM managedState.msWorkers $ \worker -> do
-        active <- readIORef worker.mwActive
-        quiescing <- readIORef worker.mwQuiescing
+        active <- readIORefU worker.mwActive
+        quiescing <- workerIsQuiescing worker
         pure (worker, active, quiescing)
     let finished = [worker | (worker, active, quiescing) <- drained, quiescing, active == 0]
     pure (managedState, finished)
@@ -476,7 +486,7 @@ cleanupUnstartedMulti multiPtr =
 new :: Ptr CurlMulti -> IO AgentContext
 new multiPtr = mask_ do
     msgQueue <- initMPSCQ 131072
-    nextId <- newIORef 0
+    nextId <- Boxed.newIORef 0
     contextStatus <- newMVar AgentContextRunning
     uvLoopPtr <-
         [C.block| uv_loop_t* {
@@ -651,9 +661,8 @@ agentWorkerCount :: Agent -> IO (Maybe Int)
 agentWorkerCount = \case
     Single agentHandle -> Just . fromEnum <$> agentHandleRunning agentHandle
     Threaded handles _ _ -> Just . length <$> filterM agentHandleRunning (NonEmpty.toList handles)
-    Managed managedAgent -> do
-        managedState <- readMVar managedAgent.maState
-        Just . length <$> selectableWorkers managedState
+    Managed managedAgent ->
+        withMVar managedAgent.maState $ fmap (Just . length) . selectableWorkers
 
 {- | Atomically pick a worker for a new transfer and register it as active.
 Growth is decided here: when every selectable worker is already busy
@@ -749,7 +758,7 @@ retireManagedWorkers managedAgent workers = do
 closeManagedAgent :: ManagedAgent -> IO ()
 closeManagedAgent managedAgent = do
     handles <- modifyMVarMasked managedAgent.maState $ \state -> do
-        forM_ state.msWorkers $ \worker -> writeIORef worker.mwQuiescing True
+        forM_ state.msWorkers markWorkerQuiescing
         pure (state{msClosed = True}, map mwHandle state.msWorkers)
     controller <- readMVar managedAgent.maController
     controllerOutcome <- try @SomeException $ Async.cancel controller
@@ -772,7 +781,7 @@ admissionPick policy config now managedState = do
     case selectable of
         [] -> spawnManagedWorker policy config now managedState
         _ -> do
-            activeCounts <- forM selectable \worker -> (worker,) <$> readIORef worker.mwActive
+            activeCounts <- forM selectable \worker -> (worker,) <$> readIORefU worker.mwActive
             let (least, leastActive) = minimumBy (comparing snd) activeCounts
                 workerCount = length selectable
                 spawnCooldownNs = microsToNanos policy.mpSpawnCooldownMicros
@@ -800,7 +809,7 @@ spawnManagedWorker policy config now state = do
 
 incrementWorker :: ManagedWorker -> IO ()
 incrementWorker worker =
-    atomicModifyIORef' worker.mwActive \active -> (active + 1, ())
+    modifyIORefU worker.mwActive (+ 1)
 
 {- | Release one lease. If the worker is draining and this was its last
 in-flight transfer, hand it back for stopping while retaining registry
@@ -812,10 +821,10 @@ releaseWorker workerId managedState = do
     released <- forM workers $ \worker ->
         if worker.mwId == workerId
             then do
-                newActive <- atomicModifyIORef' worker.mwActive \active ->
-                    let active' = max 0 (active - 1)
-                     in (active', active')
-                quiescing <- readIORef worker.mwQuiescing
+                active <- readIORefU worker.mwActive
+                let newActive = max 0 (active - 1)
+                writeIORefU worker.mwActive newActive
+                quiescing <- workerIsQuiescing worker
                 pure $ Just (worker, newActive, quiescing)
             else pure Nothing
     case catMaybes released of
@@ -824,7 +833,7 @@ releaseWorker workerId managedState = do
 
 newTransferId :: AgentContext -> IO TransferId
 newTransferId context = do
-    identifier <- atomicModifyIORef' context.nextId \current ->
+    identifier <- Boxed.atomicModifyIORef' context.nextId \current ->
         if current == maxBound
             then (current, Nothing)
             else
