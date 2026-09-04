@@ -2,8 +2,8 @@ module HCurl.Response where
 
 import Control.DeepSeq
 import GHC.Generics
-import HCurl.Internal.Metrics (Metrics)
-import HCurl.Internal.Raw.Curl (CurlCode)
+import HCurl.Metrics (Metrics)
+import HCurl.Types (CurlCode)
 import Network.HTTP.Types.Header
 
 data Response body = Response
@@ -16,7 +16,7 @@ data Response body = Response
 
 data HttpParts = HttpParts
     { statusCode :: !Int
-    , headers :: !RequestHeaders
+    , headers :: !ResponseHeaders
     }
     deriving (Show, Eq, Generic)
     deriving anyclass (NFData)
@@ -25,7 +25,7 @@ data HttpParts = HttpParts
 
 'completion' waits for the final transfer result and metrics.  With a
 bounded body reader it must be used after, or concurrently with, consuming
-'body'; waiting for completion while leaving the body unread can apply
+@body@; waiting for completion while leaving the body unread can apply
 backpressure and intentionally pause libcurl.
 -}
 data StreamingResponse body = StreamingResponse

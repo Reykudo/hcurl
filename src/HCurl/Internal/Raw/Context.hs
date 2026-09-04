@@ -14,6 +14,7 @@ import HCurl.Internal.Raw.Headers
 import HCurl.Internal.Raw.MPSC
 import HCurl.Internal.Raw.Metrics
 import HCurl.Internal.Raw.SimpleString
+import HCurl.Internal.Raw.Stream
 import HCurl.Internal.Raw.UV
 import Language.C.Inline.Context
 import Language.C.Types qualified as C
@@ -36,11 +37,12 @@ extraTypesTable :: Map.Map C.TypeSpecifier TH.TypeQ
 extraTypesTable =
     Map.fromList
         [ (C.TypeName "hs_easy_data_t", [t|EasyData|])
-        , (C.TypeName "simple_string_t", [t|SimpleString|])
+        , (C.TypeName "simple_string_t", [t|SimpleStringPtr|])
         , (C.TypeName "mpsc_t", [t|MPSCQ|])
-        , (C.TypeName "outer_message_t", [t|InternalOuterMessage|])
+        , (C.TypeName "message_sender_t", [t|MessageSender|])
         , (C.TypeName "curl_metrics_context_t", [t|CurlMetricsContext|])
         , (C.TypeName "header_data_t", [t|HeadersData|])
+        , (C.TypeName "hcurl_stream_t", [t|CurlStream|])
         ]
 
 libuvTypesTable :: Map.Map C.TypeSpecifier TH.TypeQ

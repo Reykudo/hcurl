@@ -1,4 +1,3 @@
-{-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module Main where
@@ -12,7 +11,6 @@ import Data.Atomics.Counter
 import Data.ByteString
 import Data.ByteString.Lazy qualified as LBS
 import HCurl.Agent as Agent
-import HCurl.Internal.Raw
 import HCurl.Request as Request
 import HCurl.Response qualified as HCurl
 import HCurl.Simple
@@ -20,7 +18,6 @@ import HCurl.Types
 import Network.HTTP.Client (Response (..))
 import Network.HTTP.Client qualified as HTTPClient
 import Network.HTTP.Simple qualified as HTTPSimple
-import PyF
 import UnliftIO.Exception (try)
 
 instance NFData HTTPClient.HttpException where
@@ -37,41 +34,45 @@ main = do
                 , maxConnectionPerHost = 100
                 , maxConnection = 1000
                 }
-    agent <- Agent.spawnAgent conf
-    hcurlCounterSuccess <- newCounter 0
-    hcurlCounterFailure <- newCounter 0
-    httpCounterSuccess <- newCounter 0
-    httpCounterFailure <- newCounter 0
-    let criterionConfig =
-            Criterion.defaultConfig
-                { verbosity = Verbose
-                }
-    defaultMainWith
-        criterionConfig
-        [ bgroup
-            "hcurl"
-            [ bench "1" $ nfIO (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent)
-            , bench "10" $ nfIO (makeMultpleParallel 10 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
-            , bench "100" $ nfIO (makeMultpleParallel 100 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
-            , bench "1000" $ nfIO (makeMultpleParallel 1000 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
-            -- , bench "5000" $ nfIO (makeMultpleParallel 10000 (makeGetRequestHCurl hcurlCounter agent))
+    Agent.withAgent conf \agent -> do
+        hcurlCounterSuccess <- newCounter 0
+        hcurlCounterFailure <- newCounter 0
+        httpCounterSuccess <- newCounter 0
+        httpCounterFailure <- newCounter 0
+        let criterionConfig =
+                Criterion.defaultConfig
+                    { verbosity = Verbose
+                    }
+        defaultMainWith
+            criterionConfig
+            [ bgroup
+                "hcurl"
+                [ bench "1" $ nfIO (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent)
+                , bench "10" $ nfIO (makeMultpleParallel 10 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
+                , bench "100" $ nfIO (makeMultpleParallel 100 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
+                , bench "1000" $ nfIO (makeMultpleParallel 1000 (makeGetRequestHCurl hcurlCounterSuccess hcurlCounterFailure agent))
+                ]
+            , bgroup
+                "http-client"
+                [ bench "1" $ nfIO (makeGetRequestHTTPClient httpCounterSuccess httpCounterFailure)
+                , bench "10" $ nfIO (makeMultpleParallel 10 (makeGetRequestHTTPClient httpCounterSuccess httpCounterFailure))
+                , bench "100" $ nfIO (makeMultpleParallel 100 (makeGetRequestHTTPClient httpCounterSuccess httpCounterFailure))
+                ]
             ]
-        , bgroup
-            "http-client"
-            [ bench "1" $ nfIO (makeGetRequestHTTPClient httpCounterSuccess httpCounterFailure)
-            , bench "10" $ nfIO (makeMultpleParallel 10 (makeGetRequestHTTPClient httpCounterSuccess httpCounterFailure))
-            , bench "100" $ nfIO (makeMultpleParallel 100 (makeGetRequestHTTPClient httpCounterSuccess httpCounterFailure))
-            -- , bench "1000" $ nfIO (makeMultpleParallel 1000 (makeGetRequestHTTPClient httpCounter))
-            -- , bench "5000" $ nfIO (makeMultpleParallel 10000 (makeGetRequestHTTPClient httpCounter))
-            ]
-        ]
-    hcurlCounterSuccessVal <- readCounter hcurlCounterSuccess
-    hcurlCounterFailureVal <- readCounter hcurlCounterFailure
-    httpCounterSuccessVal <- readCounter httpCounterSuccess
-    httpCounterFailureVal <- readCounter httpCounterFailure
-    print
-        [fmt|hcurl counter - success {hcurlCounterSuccessVal} - failed  {hcurlCounterFailureVal}
-    http counter - {httpCounterSuccessVal} - failed  {httpCounterFailureVal}|]
+        hcurlCounterSuccessVal <- readCounter hcurlCounterSuccess
+        hcurlCounterFailureVal <- readCounter hcurlCounterFailure
+        httpCounterSuccessVal <- readCounter httpCounterSuccess
+        httpCounterFailureVal <- readCounter httpCounterFailure
+        putStrLn $
+            "hcurl counter - success "
+                <> show hcurlCounterSuccessVal
+                <> " - failed "
+                <> show hcurlCounterFailureVal
+        putStrLn $
+            "http counter - success "
+                <> show httpCounterSuccessVal
+                <> " - failed "
+                <> show httpCounterFailureVal
 
 makeMultpleParallel :: Int -> IO a -> IO [a]
 makeMultpleParallel n action =
@@ -87,15 +88,9 @@ makeGetRequestHCurl sCounter fCounter agent = do
 
 hcurlGetRequest :: Request
 hcurlGetRequest =
-    Request
-        { host = "https://example.com/"
-        , timeoutMS = 0
-        , connectionTimeoutMS = 400
+    (defaultRequest "https://example.com/")
+        { connectionTimeoutMS = 400
         , lowSpeedLimit = LowSpeedLimit{timeout = 1, lowSpeed = 1}
-        , Request.body = Empty
-        , Request.headers = NoHeaders
-        , method = Get
-        , extraOptions = []
         }
 
 makeGetRequestHTTPClient :: AtomicCounter -> AtomicCounter -> IO (Either HTTPSimple.HttpException ByteString)

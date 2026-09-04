@@ -10,12 +10,14 @@
 module HCurl.Internal.Slist where
 
 import Control.Exception
+import Control.Monad (when)
 import Control.Monad.Cont (ContT (..))
 import Control.Monad.Trans
 import Control.Monad.Trans.Resource (MonadResource, ReleaseKey, allocate)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Coerce
+import Data.Foldable (for_)
 import Foreign
 import HCurl.Internal.Raw
 import Language.C.Inline qualified as C
@@ -26,7 +28,10 @@ C.context (C.baseCtx <> localCtx)
 C.include "<curl/curl.h>"
 C.include "extras.h"
 
-data CurlSlistError = CurlSlistAppendFailed
+data CurlSlistError
+    = CurlSlistAppendFailed
+    | CurlSlistContainsNul !Int
+    | CurlSlistContainsNewline !Int
     deriving (Show)
     deriving anyclass (Exception)
 
@@ -57,7 +62,16 @@ toHeaderSlistCont headers = do
         else pure ptr
 
 toHeaderSlistP :: [ByteString] -> IO (Ptr CurlSlist)
-toHeaderSlistP headers = runContT (toHeaderSlistCont headers) pure
+toHeaderSlistP [] = pure nullPtr
+toHeaderSlistP headers = do
+    for_ (zip [0 ..] headers) \(index, header) ->
+        if BS.elem 0 header
+            then throwIO $ CurlSlistContainsNul index
+            else
+                when (BS.elem 10 header || BS.elem 13 header) $
+                    throwIO $
+                        CurlSlistContainsNewline index
+    runContT (toHeaderSlistCont headers) pure
 
 finalizeCurlSlist :: FunPtr (Ptr CurlSlist -> IO ())
 finalizeCurlSlist = [C.funPtr| void free_slist(curl_slist_t* ptr){ curl_slist_free_all(ptr); } |]
@@ -69,6 +83,40 @@ allocateSlist headers =
         (toHeaderSlistP headers)
         \ptr -> [CU.block|void {curl_slist_free_all($(curl_slist_t* ptr));}|]
 
+{- | Add one request-local header in front of a borrowed reusable list unless
+that list already contains the same (ASCII case-insensitive) header name.
+Only the prefix is owned; the borrowed tail is kept alive by the release
+action and is never copied or mutated.
+-}
+allocateSlistOverlayHeader :: (MonadResource m) => ForeignPtr CurlSlist -> ByteString -> m (ReleaseKey, Ptr CurlSlist)
+allocateSlistOverlayHeader borrowed header = do
+    when (BS.elem 0 header) $ liftIO $ throwIO $ CurlSlistContainsNul 0
+    when (BS.elem 10 header || BS.elem 13 header) $
+        liftIO $
+            throwIO $
+                CurlSlistContainsNewline 0
+    allocate create destroy
+  where
+    create =
+        withForeignPtr borrowed \borrowedPtr ->
+            BS.useAsCString header \headerPtr -> do
+                headPtr <-
+                    [CU.exp| curl_slist_t* {
+                        hcurl_slist_overlay_header(
+                            $(curl_slist_t* borrowedPtr), $(char* headerPtr))
+                    } |]
+                when (headPtr == nullPtr) $ throwIO CurlSlistAppendFailed
+                pure headPtr
+    destroy headPtr =
+        withForeignPtr borrowed \borrowedPtr ->
+            [CU.block| void {
+                hcurl_slist_free_overlay(
+                    $(curl_slist_t* headPtr), $(curl_slist_t* borrowedPtr));
+            } |]
+
 -- | Manage memory with ForeignPtr
 toHeaderSlist :: [ByteString] -> IO CurlSlist
-toHeaderSlist headers = toHeaderSlistP headers >>= coerce . newForeignPtr finalizeCurlSlist
+toHeaderSlist headers = mask_ do
+    ptr <- toHeaderSlistP headers
+    coerce (newForeignPtr finalizeCurlSlist ptr)
+        `onException` [CU.block| void { curl_slist_free_all($(curl_slist_t* ptr)); } |]

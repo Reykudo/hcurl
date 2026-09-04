@@ -1,24 +1,42 @@
 {-# LANGUAGE ImpredicativeTypes #-}
 
-module HCurl.Request where
+module HCurl.Request (
+    InvalidRequest (..),
+    LowSpeedLimit (..),
+    Request (..),
+    RequestHeader (..),
+    defaultRequest,
+) where
 
-import Control.Concurrent.MVar
 import Control.DeepSeq
-import Control.Monad
-import Control.Monad.Trans.Resource
+import Control.Exception (Exception)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Word (Word8)
 import GHC.Generics
-import HCurl.Internal.Options
 import HCurl.Internal.Raw
-import HCurl.Internal.Raw.Extras
-import HCurl.Internal.Raw.Headers
-import HCurl.Internal.Raw.Metrics (CurlMetricsContext)
+import HCurl.Options
 import HCurl.Types
 
--- | TODO async request body
+data InvalidRequest
+    = RequestURLIsEmpty
+    | RequestContainsNul !String
+    | RequestContainsControl !String !Word8
+    | NegativeRequestTimeout !String !Int
+    | HeadRequestHasBody
+    | StreamingUploadRequiresPost
+    | StreamingUploadRequiresEmptyBody
+    | StreamingUploadRedirectsUnsupported
+    | RequestValueOutOfRange !String !Integer
+    | InvalidHTTPMethod !BS.ByteString
+    | RequestHeaderContainsNul !Int
+    | RequestHeaderContainsNewline !Int
+    deriving (Show)
+
+instance Exception InvalidRequest
+
 data Request = Request
-    { host :: !ByteString
+    { url :: !ByteString
     , timeoutMS :: !Int
     , connectionTimeoutMS :: !Int
     , lowSpeedLimit :: !LowSpeedLimit
@@ -41,19 +59,16 @@ data LowSpeedLimit = LowSpeedLimit
     deriving (Generic)
     deriving anyclass (NFData)
 
--- TODO: support streaming request body
-data RequestHandler response = RequestHandler
-    { easy :: !CurlEasy
-    , easyData :: !EasyData
-    , doneRequest :: !(MVar ())
-    , requestHeaders :: HeadersData
-    , requestBody :: !Body
-    , responseTarget :: !response
-    , metricsContext :: !CurlMetricsContext
-    , resources :: ![ReleaseKey]
-    }
-    deriving (Generic)
-
-completeResponse :: MVar () -> IO ()
-completeResponse completeResponseWaker = do
-    void $ tryPutMVar completeResponseWaker ()
+-- | A GET request with libcurl's timeout defaults and no custom headers.
+defaultRequest :: ByteString -> Request
+defaultRequest requestUrl =
+    Request
+        { url = requestUrl
+        , timeoutMS = 0
+        , connectionTimeoutMS = 0
+        , lowSpeedLimit = LowSpeedLimit{lowSpeed = 0, timeout = 0}
+        , body = Empty
+        , method = Get
+        , headers = NoHeaders
+        , extraOptions = []
+        }

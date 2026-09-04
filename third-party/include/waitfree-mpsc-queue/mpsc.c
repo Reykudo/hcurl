@@ -11,23 +11,38 @@
  * Requirements: max must be >= 2 */
 struct mpscq *mpscq_create(struct mpscq *n, size_t capacity)
 {
+	if(capacity < 2 || (capacity & (capacity - 1)) != 0
+			|| capacity > SIZE_MAX / sizeof(*n->buffer))
+		return NULL;
+	bool allocated = false;
 	if(!n) {
 		n = calloc(1, sizeof(*n));
+		if(!n)
+			return NULL;
+		allocated = true;
 		n->flags |= MPSCQ_MALLOC;
 	} else {
 		n->flags = 0;
 	}
-	n->count = 0;
-	n->head = 0;
+	atomic_init(&n->count, 0);
+	atomic_init(&n->head, 0);
 	n->tail = 0;
-	n->buffer = calloc(capacity, sizeof(void *));
+	n->buffer = malloc(capacity * sizeof(*n->buffer));
+	if(!n->buffer) {
+		if(allocated)
+			free(n);
+		return NULL;
+	}
+	for(size_t index = 0; index < capacity; ++index)
+		atomic_init(&n->buffer[index], NULL);
 	n->max = capacity;
-	atomic_thread_fence(memory_order_release);
 	return n;
 }
 
 void mpscq_destroy(struct mpscq *q)
 {
+	if(!q)
+		return;
 	free(q->buffer);
 	if(q->flags & MPSCQ_MALLOC)
 		free(q);
@@ -35,6 +50,8 @@ void mpscq_destroy(struct mpscq *q)
 
 bool mpscq_enqueue(struct mpscq *q, void *obj)
 {
+	if(!q || !obj)
+		return false;
 	size_t count = atomic_fetch_add_explicit(&q->count, 1, memory_order_acquire);
 	if(count >= q->max) {
 		/* back off, queue is full */
@@ -52,6 +69,8 @@ bool mpscq_enqueue(struct mpscq *q, void *obj)
 
 void *mpscq_dequeue(struct mpscq *q)
 {
+	if(!q)
+		return NULL;
 	void *ret = atomic_exchange_explicit(&q->buffer[q->tail], NULL, memory_order_acquire);
 	if(!ret) {
 		/* a thread is adding to the queue, but hasn't done the atomic_exchange yet
@@ -71,11 +90,14 @@ void *mpscq_dequeue(struct mpscq *q)
 
 size_t mpscq_count(struct mpscq *q)
 {
+	if(!q)
+		return 0;
 	return atomic_load_explicit(&q->count, memory_order_relaxed);
 }
 
 size_t mpscq_capacity(struct mpscq *q)
 {
+	if(!q)
+		return 0;
 	return q->max;
 }
-

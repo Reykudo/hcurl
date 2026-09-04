@@ -12,7 +12,6 @@ import Control.Monad.Trans.Resource (MonadResource)
 import Data.ByteString (ByteString)
 import Data.Conduit (ConduitT, bracketP, yield)
 import HCurl.Agent (Agent)
-import HCurl.Internal.Raw (CurlCode)
 import HCurl.Request (Request)
 import HCurl.Response (StreamingResponse (..))
 import HCurl.Streaming (
@@ -23,6 +22,7 @@ import HCurl.Streaming (
     httpStreamingWith,
     readBody,
  )
+import HCurl.Types (CurlCode)
 import UnliftIO (MonadUnliftIO, throwIO)
 
 {- | Turn hcurl's framework-independent 'BodyReader' into a Conduit source.
@@ -44,7 +44,7 @@ http = httpWith defaultStreamConfig
 
 httpWith :: (MonadResource m, MonadUnliftIO m) => StreamConfig -> Agent -> Request -> m (Either CurlCode (StreamingResponse (ConduitT () ByteString m ())))
 httpWith streamConfig agent request =
-    fmap (fmap toConduitResponse) $ httpStreamingWith streamConfig agent request
+    fmap toConduitResponse <$> httpStreamingWith streamConfig agent request
 
 toConduitResponse :: (MonadResource m, MonadIO m) => StreamingResponse BodyReader -> StreamingResponse (ConduitT () ByteString m ())
 toConduitResponse StreamingResponse{info = responseInfo, body = responseBody, completion = responseCompletion} =

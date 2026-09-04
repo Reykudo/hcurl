@@ -1,45 +1,35 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 module HCurl.Internal.Raw.MPSC where
 
-import HCurl.Internal.Raw.Alloc
+import Foreign (Ptr)
+import Data.Word (Word64)
 import HCurl.Internal.Raw.Curl
-import Foreign 
-import GHC.Conc
-import Control.Concurrent.MVar
+import HCurl.Internal.Raw.Extras
+import HCurl.Internal.Raw.Metrics
+import HCurl.Internal.Raw.Stream
 
 #include "message_chan.h"
-#include <uv.h>
 
 {# pointer *mpsc_t as MPSCQ foreign newtype #}
 
-{#enum outer_message_types as InternalOuterMessageTag {underscoreToCase} add prefix = "Internal" deriving (Eq)#}
+{# pointer *message_sender_t as MessageSender foreign newtype #}
 
-{#pointer *outer_message_t as InternalOuterMessage newtype #}
+{# enum outer_message_types as InternalOuterMessageTag {underscoreToCase} add prefix = "Internal" deriving (Eq) #}
+
+newtype TransferId = TransferId {unTransferId :: Word64}
+    deriving (Show, Eq, Ord)
+
+data TransferStreams = TransferStreams
+    { downloadStream :: !(Maybe CurlStream)
+    , uploadStream :: !(Maybe CurlStream)
+    }
+
+noTransferStreams :: TransferStreams
+noTransferStreams = TransferStreams Nothing Nothing
 
 data OuterMessage
-    = Execute (Ptr CurlEasy)
-    | CancelRequest (Ptr CurlEasy) (MVar ())
-    | ResumeRequest (Ptr CurlEasy)
+    = Execute !TransferId !(Ptr CurlEasy) !EasyData !CurlMetricsContext !TransferStreams
+    | CancelRequest !TransferId
+    | ResumeRequest !TransferId
     | StopAgent
-
-toInnerOuterMessage :: OuterMessage -> IO InternalOuterMessage
-toInnerOuterMessage msg = do
-    ptr' <- c_malloc {# sizeof outer_message_t #}
-    let cMsg = InternalOuterMessage $ castPtr ptr'
-    case msg of
-        Execute easy -> do
-            {#set outer_message_t.tag#} cMsg (fromIntegral . fromEnum $ InternalExecute)
-            {#set outer_message_t.execute_payload.easy#} cMsg (castPtr easy)
-        CancelRequest easy waker -> do
-            (cap, _locked) <- threadCapability =<< myThreadId
-            wakerSPtr <- newStablePtrPrimMVar waker
-            {#set outer_message_t.tag#} cMsg (fromIntegral . fromEnum $ InternalCancelRequest)
-            {#set outer_message_t.cancel_payload.easy#} cMsg (castPtr easy)
-            {#set outer_message_t.cancel_payload.waker.mvar#} cMsg (castStablePtrToPtr wakerSPtr)
-            {#set outer_message_t.cancel_payload.waker.waked#} cMsg False
-            {#set outer_message_t.cancel_payload.waker.capability#} cMsg (fromIntegral cap)
-        ResumeRequest easy -> do
-            {#set outer_message_t.tag#} cMsg (fromIntegral . fromEnum $ InternalResumeRequest)
-            {#set outer_message_t.resume_payload.easy#} cMsg (castPtr easy)
-        StopAgent -> do
-            {#set outer_message_t.tag#} cMsg (fromIntegral . fromEnum $ InternalStopAgent)
-    pure cMsg

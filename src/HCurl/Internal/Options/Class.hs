@@ -1,11 +1,4 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE CApiFFI #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE QuasiQuotes #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TemplateHaskellQuotes #-}
-{-# LANGUAGE TypeFamilyDependencies #-}
 
 module HCurl.Internal.Options.Class where
 

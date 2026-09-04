@@ -1,180 +1,258 @@
-#include <assert.h>
 #include "curl_uv.h"
-#include "extras.h"
 
-socket_context_t *new_socket_context(multi_context_t *multi_context, curl_socket_t socket_fd) {
-    socket_context_t *socket_context = malloc(sizeof(socket_context_t));
+#include "message_chan.h"
 
-    socket_context->multi = multi_context->multi;
-    socket_context->socket_fd = socket_fd;
+#include <stdlib.h>
 
-    uv_poll_init_socket(multi_context->loop, &socket_context->poll_handle, socket_fd);
-    socket_context->poll_handle.data = socket_context;
-
-    return socket_context;
+static void destroy_socket_context_cb(uv_handle_t *handle) {
+    free(handle ? handle->data : NULL);
 }
 
-void destroy_socket_context_cb(uv_handle_t *handle) {
-    socket_context_t *context = handle->data;
-    free(context);
+static void destroy_socket_context(socket_context_t *context) {
+    if (context && !uv_is_closing((uv_handle_t *)&context->poll_handle)) {
+        uv_close((uv_handle_t *)&context->poll_handle, destroy_socket_context_cb);
+    }
 }
 
-void destroy_socket_context(socket_context_t *context) {
-    uv_close((uv_handle_t *) &context->poll_handle, destroy_socket_context_cb);
+static socket_context_t *new_socket_context(multi_context_t *multi_context,
+                                            curl_socket_t socket_fd) {
+    socket_context_t *context = calloc(1, sizeof(*context));
+    if (!context) {
+        return NULL;
+    }
+    context->multi_context = multi_context;
+    context->socket_fd = socket_fd;
+    if (uv_poll_init_socket(multi_context->loop, &context->poll_handle, socket_fd) != 0) {
+        free(context);
+        return NULL;
+    }
+    context->poll_handle.data = context;
+    return context;
 }
 
-void check_multi_info(CURLM *multi) {
-    CURLMsg *message = NULL;
+void check_multi_info(async_messages_context_t *context) {
+    if (!context || !context->multi) {
+        return;
+    }
     int pending = 0;
-    CURL *easy_handle = NULL;
-
-    while ((message = curl_multi_info_read(multi, &pending))) {
-        switch (message->msg) {
-            case CURLMSG_DONE:
-                easy_handle = message->easy_handle;
-
-                hs_easy_data_t *hs_easy_data = NULL;
-                curl_easy_getinfo(easy_handle, CURLINFO_PRIVATE, &hs_easy_data);
-
-                hs_easy_data->curl_code = message->data.result;
-                hs_easy_data->active = false;
-                
-                curl_multi_remove_handle(multi, easy_handle);
-                wake_up_waker(&hs_easy_data->waker);
-
-                break;
-            default:
-                break;
+    CURLMsg *message = NULL;
+    while ((message = curl_multi_info_read(context->multi, &pending))) {
+        if (message->msg == CURLMSG_DONE) {
+            complete_transfer(context, message->easy_handle, message->data.result);
         }
     }
 }
 
-void socket_callback(uv_poll_t *poll, int status, int events) {
-    (void) status;
-    int running_handles = 0;
-    int flags = 0;
+static CURLMcode drive_multi_socket(CURLM *multi, curl_socket_t socket_fd,
+                                    int flags, int *running_handles) {
+    CURLMcode code;
+    do {
+        code = curl_multi_socket_action(multi, socket_fd, flags,
+                                        running_handles);
+    } while (code == CURLM_CALL_MULTI_PERFORM);
+    return code;
+}
 
+static void socket_callback(uv_poll_t *poll, int status, int events) {
+    socket_context_t *socket_context = poll ? poll->data : NULL;
+    if (!socket_context || !socket_context->multi_context) {
+        return;
+    }
+    multi_context_t *multi_context = socket_context->multi_context;
+    int flags = 0;
     if (status < 0) {
         flags = CURL_CSELECT_ERR;
-    }
-
-    if (!status && events & UV_READABLE) {
-        flags |= CURL_CSELECT_IN;
-    }
-    if (!status && events & UV_WRITABLE) {
-        flags |= CURL_CSELECT_OUT;
-    }
-
-    socket_context_t *socket_context = poll->data;
-
-    curl_multi_socket_action(socket_context->multi, socket_context->socket_fd, flags,
-                             &running_handles);
-    check_multi_info(socket_context->multi);
-}
-
-void on_timeout(uv_timer_t *timer) {
-    CURLM *multi = timer->data;
-    int running_handles = 0;
-    curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &running_handles);
-    check_multi_info(multi);
-}
-
-int curl_timer_function(CURLM *multi, long timeout_ms, multi_context_t *multi_context) {
-    (void) multi;
-    if (timeout_ms < 0) {
-        uv_timer_stop(&multi_context->timer);
     } else {
-        if (timeout_ms == 0) {
-            timeout_ms = 1;
+        if (events & UV_READABLE) {
+            flags |= CURL_CSELECT_IN;
         }
-        uv_timer_start(&multi_context->timer, on_timeout, timeout_ms, 0);
+        if (events & UV_WRITABLE) {
+            flags |= CURL_CSELECT_OUT;
+        }
     }
-    return 0;
+
+    int running_handles = 0;
+    CURLMcode code = drive_multi_socket(multi_context->multi,
+                                        socket_context->socket_fd,
+                                        flags, &running_handles);
+    if (code == CURLM_BAD_SOCKET) {
+        /* Old libcurl releases a socket before an already queued libuv event
+         * for that fd is dispatched.  CURLM_BAD_SOCKET is therefore a stale
+         * notification, not a failure of the multi handle.  Retire our poll
+         * watcher and keep the reactor alive for the remaining transfers. */
+        if (!uv_is_closing((uv_handle_t *)poll)) {
+            (void)uv_poll_stop(poll);
+            destroy_socket_context(socket_context);
+        }
+#if LIBCURL_VERSION_NUM < 0x071301
+        do {
+            code = curl_multi_socket_all(multi_context->multi, &running_handles);
+        } while (code == CURLM_CALL_MULTI_PERFORM);
+        if (code != CURLM_OK) {
+            shutdown_message_context(multi_context->messages, CURLE_RECV_ERROR);
+            uv_stop(multi_context->loop);
+            return;
+        }
+#endif
+        check_multi_info(multi_context->messages);
+        return;
+    }
+    if (code != CURLM_OK) {
+        shutdown_message_context(multi_context->messages, CURLE_RECV_ERROR);
+        uv_stop(multi_context->loop);
+        return;
+    }
+    check_multi_info(multi_context->messages);
 }
 
-int curl_socket_function(CURL *easy, curl_socket_t socket_fd, int action, multi_context_t *multi_context,
-                         socket_context_t *socket_context_p) {
-    (void) easy;
-    socket_context_t *socket_context = NULL;
-    int events = 0;
+static void on_timeout(uv_timer_t *timer) {
+    multi_context_t *multi_context = timer ? timer->data : NULL;
+    if (!multi_context) {
+        return;
+    }
+    int running_handles = 0;
+    CURLMcode code = drive_multi_socket(multi_context->multi,
+                                        CURL_SOCKET_TIMEOUT, 0,
+                                        &running_handles);
+    if (code != CURLM_OK) {
+        shutdown_message_context(multi_context->messages, CURLE_OPERATION_TIMEDOUT);
+        uv_stop(multi_context->loop);
+        return;
+    }
+    check_multi_info(multi_context->messages);
+}
+
+static int curl_timer_function(CURLM *multi, long timeout_ms, void *userdata) {
+    (void)multi;
+    multi_context_t *context = userdata;
+    if (!context) {
+        return -1;
+    }
+    if (timeout_ms < 0) {
+        return uv_timer_stop(&context->timer) == 0 ? 0 : -1;
+    }
+    /* A zero timeout is deliberately passed through: libuv schedules it for
+     * the next loop iteration, so there is no recursive curl call and no
+     * artificial one-millisecond startup delay. */
+    return uv_timer_start(&context->timer, on_timeout, (uint64_t)timeout_ms, 0) == 0
+               ? 0
+               : -1;
+}
+
+static int curl_socket_function(CURL *easy, curl_socket_t socket_fd, int action,
+                                void *userdata, void *socket_data) {
+    (void)easy;
+    multi_context_t *multi_context = userdata;
+    socket_context_t *context = socket_data;
+    if (!multi_context) {
+        return -1;
+    }
 
     switch (action) {
         case CURL_POLL_IN:
         case CURL_POLL_OUT:
-        case CURL_POLL_INOUT:
-            if (socket_context_p && !uv_is_closing((uv_handle_t *) &socket_context_p->poll_handle)) {
-                socket_context = socket_context_p;
-            } else {
-                socket_context = new_socket_context(multi_context, socket_fd);
-                curl_multi_assign(multi_context->multi, socket_fd, socket_context);
+        case CURL_POLL_INOUT: {
+            if (!context || uv_is_closing((uv_handle_t *)&context->poll_handle)) {
+                context = new_socket_context(multi_context, socket_fd);
+                if (!context
+                    || curl_multi_assign(multi_context->multi, socket_fd, context) != CURLM_OK) {
+                    destroy_socket_context(context);
+                    return -1;
+                }
             }
-
+            int events = 0;
             if (action != CURL_POLL_IN) {
                 events |= UV_WRITABLE;
             }
             if (action != CURL_POLL_OUT) {
                 events |= UV_READABLE;
             }
-
-            assert(socket_context);
-            assert(&socket_context->poll_handle);
-            assert(socket_context->multi);
-            uv_poll_start(&socket_context->poll_handle, events, socket_callback);
-            break;
+            return uv_poll_start(&context->poll_handle, events, socket_callback) == 0 ? 0 : -1;
+        }
         case CURL_POLL_REMOVE:
-            if (socket_context_p) {
-                uv_poll_stop(&socket_context_p->poll_handle);
-                destroy_socket_context(socket_context_p);
-                curl_multi_assign(multi_context->multi, socket_fd, NULL);
+            if (context) {
+                (void)uv_poll_stop(&context->poll_handle);
+                (void)curl_multi_assign(multi_context->multi, socket_fd, NULL);
+                destroy_socket_context(context);
             }
-            break;
+            return 0;
         default:
-            abort();
+            return -1;
     }
-
-    return 0;
 }
 
-void bind_uv_curl_multi(uv_loop_t *loop, CURLM *multi) {
-    multi_context_t *multi_context = malloc(sizeof(multi_context_t));
+bool bind_uv_curl_multi(uv_loop_t *loop, CURLM *multi,
+                        async_messages_context_t *messages) {
+    if (!loop || !multi || !messages) {
+        return false;
+    }
+    multi_context_t *context = calloc(1, sizeof(*context));
+    if (!context) {
+        return false;
+    }
+    context->loop = loop;
+    context->multi = multi;
+    context->messages = messages;
 
-    multi_context->multi = multi;
-    multi_context->loop = loop;
-    loop->data = multi_context;
-
-    uv_timer_init(loop, &multi_context->timer);
-    multi_context->timer.data = multi;
-
-    curl_multi_setopt(multi, CURLMOPT_SOCKETFUNCTION, curl_socket_function);
-    curl_multi_setopt(multi, CURLMOPT_SOCKETDATA, multi_context);
-
-    curl_multi_setopt(multi, CURLMOPT_TIMERFUNCTION, curl_timer_function);
-    curl_multi_setopt(multi, CURLMOPT_TIMERDATA, multi_context);
+    if (curl_multi_setopt(multi, CURLMOPT_SOCKETFUNCTION, curl_socket_function) != CURLM_OK
+        || curl_multi_setopt(multi, CURLMOPT_SOCKETDATA, context) != CURLM_OK
+        || curl_multi_setopt(multi, CURLMOPT_TIMERFUNCTION, curl_timer_function) != CURLM_OK
+        || curl_multi_setopt(multi, CURLMOPT_TIMERDATA, context) != CURLM_OK) {
+        (void)curl_multi_setopt(multi, CURLMOPT_SOCKETFUNCTION, NULL);
+        (void)curl_multi_setopt(multi, CURLMOPT_SOCKETDATA, NULL);
+        (void)curl_multi_setopt(multi, CURLMOPT_TIMERFUNCTION, NULL);
+        (void)curl_multi_setopt(multi, CURLMOPT_TIMERDATA, NULL);
+        free(context);
+        return false;
+    }
+    if (uv_timer_init(loop, &context->timer) != 0) {
+        (void)curl_multi_setopt(multi, CURLMOPT_SOCKETFUNCTION, NULL);
+        (void)curl_multi_setopt(multi, CURLMOPT_SOCKETDATA, NULL);
+        (void)curl_multi_setopt(multi, CURLMOPT_TIMERFUNCTION, NULL);
+        (void)curl_multi_setopt(multi, CURLMOPT_TIMERDATA, NULL);
+        free(context);
+        return false;
+    }
+    context->timer.data = context;
+    loop->data = context;
+    return true;
 }
 
 static void close_handle_cb(uv_handle_t *handle, void *arg) {
-    (void) arg;
+    (void)arg;
     if (!uv_is_closing(handle)) {
-        uv_close(handle, NULL);
+        if (handle->type == UV_POLL) {
+            uv_close(handle, destroy_socket_context_cb);
+        } else {
+            uv_close(handle, NULL);
+        }
     }
 }
 
-void agent_shutdown(uv_loop_t *loop, uv_async_t *async, CURLM *multi) {
-    if (multi) {
-        curl_multi_cleanup(multi);
+void agent_shutdown(uv_loop_t *loop, uv_async_t *async_handle, CURLM *multi) {
+    if (!loop) {
+        return;
     }
-    if (async && !uv_is_closing((uv_handle_t *) async)) {
-        uv_close((uv_handle_t *) async, NULL);
+    async_messages_context_t *messages = async_handle ? async_handle->data : NULL;
+    /* libuv 1.0 poisons the uv_loop_t storage in debug builds when
+     * uv_loop_close succeeds, including loop->data.  Keep the allocation we
+     * own before closing the loop instead of reading poisoned memory. */
+    multi_context_t *multi_context = loop->data;
+    shutdown_message_context(messages, CURLE_ABORTED_BY_CALLBACK);
+
+    if (multi) {
+        (void)curl_multi_cleanup(multi);
     }
     uv_walk(loop, close_handle_cb, NULL);
     while (uv_loop_alive(loop)) {
-        uv_run(loop, UV_RUN_NOWAIT);
+        (void)uv_run(loop, UV_RUN_NOWAIT);
     }
-    uv_loop_close(loop);
-    free(loop->data);
-    if (async) {
-        free(async->data);
+    (void)uv_loop_close(loop);
+
+    free(multi_context);
+    if (async_handle) {
+        destroy_message_context(async_handle->data);
     }
-    free(async);
+    free(async_handle);
     free(loop);
 }

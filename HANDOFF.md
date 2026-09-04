@@ -1,70 +1,75 @@
-# Handoff: hcurl audit session (2026-09-03)
+# hcurl maintenance notes
 
-## State
+## Non-negotiable architecture
 
-- Repo: `/home/rafael/Projects/hcurl`, branch `master`.
-- HEAD: `192f4dd`; worktree clean.
-- Gates green at HEAD (run from repo root, inside `direnv exec .`):
-  - `cabal test all -j1 --test-show-details=direct` (hcurl-test 14/14, hcurl-conduit-test 7/7)
-  - hcurl-test under `--test-options='+RTS -N1 -RTS'`: 14/14
-  - Full hcurl-test under valgrind `-N1`: 0 errors
+- libcurl callbacks stay in C. Do not introduce `foreign import ... "wrapper"`
+  callbacks on transfer hot paths.
+- The C MPSC queue is the multi-producer control path. The libuv agent thread
+  is the sole consumer and the sole owner of the transfer registry.
+- Download and upload payloads use the bounded C ring in `cbits/stream.c`.
+  A ready reader/writer operation makes one unsafe Haskell-to-C call. Blocking
+  adds waiter registration, one `MVar` sleep, and a retry; setup and final
+  snapshots are batched where state has the same lifetime.
+- The package baseline is libcurl 7.18 and libuv 1.0. Streaming upload alone
+  requires libcurl 7.19 because 7.18's `CURL_READFUNC_PAUSE` implementation is
+  memory-unsafe; keep the linked-library runtime guard and
+  `streamingUploadSupported`.
+- Streaming POST uses libcurl upload state with an unknown size and a custom
+  `POST` wire method. Keep the request-local `Expect:` suppression: curl 7.19.0
+  can otherwise stall in the old socket API while both peers wait. For reusable
+  `OverrideHeaders`, the suppression is an owned one-node overlay over the
+  borrowed slist; never copy, mutate, or prematurely release the caller's list.
+- `hs_try_putmvar` provides one-shot wakeups. It consumes a fired
+  `newStablePtrPrimMVar` pointer; never free or reuse that pointer after C has
+  detached and fired the waiter. Cancellation may free it only when the C
+  unregister operation explicitly returns ownership. Easy completion tracks
+  that transfer with its own atomic ownership flag; do not read the generic
+  waker's plain field from a different thread.
+- An easy handle belongs to Haskell until execute enqueue succeeds. From that
+  point through completion, cancellation, or shutdown it belongs exclusively
+  to the C agent thread.
+- Resume and cancel messages carry `TransferId`, never `CURL *`. IDs are not
+  reused, and late messages are no-ops.
+- Managed workers stay in the pool registry while retirement is in progress.
+  Stop first and remove second, so concurrent close or an async exception
+  cannot orphan a reactor.
+- Agent and controller threads are spawned with `asyncWithUnmask` variants.
+  Their parents run masked during setup, so plain `async` would silently make
+  a child-local `restore` ineffective and could make hooks unkillable.
+- `CurlCode` is a header-independent numeric ABI table with an
+  `UnknownCurlCode` fallback. Do not regenerate it from the local curl headers:
+  that makes the public constructors vary by build and makes a newer runtime's
+  error code partial at `toEnum`.
 
-## Committed this session (oldest → newest)
+## Build gotcha
 
-- `39ed4ca` managed agent pool (admission growth, controller shrink, metrics hook, agent shutdown), conduit package, streaming core + tests
-- `1264fad` deterministic single idempotent stream release registered in caller's ResourceT; `withHttpStreaming`/`withHttpStreamingWith`; abandoned/blocked-reader/handler-scope tests
-- `4b059fe` single registered teardown key; cancel of never-active easy wakes owner; blocked-reader and managed lease-leak tests
-- `766c8d6` size-overflow guards in `simple_string_writefunc` and `header_callback` (return 0 instead of `-1`/wraparound)
-- `8848977` test: `bufferedChunks = 0` rejected before transfer
-- `1ed58ba` buffered body buffer grows geometrically (was O(n²) realloc per chunk)
-- `192f4dd` documents why the waker stable pointer is never freed
+`c2hs` does not reliably notice C header layout changes, and Cabal's inplace
+package registration is shared by configurations in one build directory.
+After changing a C struct/header, compiler optimization, or native dependency,
+use a fresh build directory before interpreting crashes or type mismatches.
+Pass that same directory and configuration to `cabal list-bin`; an unqualified
+`list-bin` can select a stale executable from another configuration.
 
-## Known limitation (by design, documented in code)
+```console
+direnv exec . cabal test all -j1 \
+  --builddir=dist-verify-o2 \
+  --enable-optimization=2
+direnv exec . cabal list-bin test:hcurl-test \
+  --builddir=dist-verify-o2 \
+  --enable-optimization=2
+```
 
-Per-request stable pointers for `hs_try_putmvar` wakers (`doneRequest`, cancel
-ack) are never freed. GHC 9.10 offers no cleanup API for
-`newStablePtrPrimMVar`; freeing or reusing the pinned slot crashes the RTS
-under concurrency (six strategies tested on clean rebuilds). GHC's own sample
-leaks identically. Measured impact is negligible (~bytes/request after
-warm-up, RSS flat over 20k requests).
+## Required release checks
 
-## Verification coverage (done, no findings)
+- clean `-O2` build and both test suites with default RTS capabilities and
+  `+RTS -N1 -RTS`;
+- C compilation with `-Wall -Wextra -Werror`;
+- Valgrind or equivalent lifetime checking for shutdown/cancel tests;
+- `cabal check`, Haddock, sdist build, and Nix build;
+- compatibility compile against the declared libcurl 7.18 and libuv 1.0
+  headers after changes to native code, plus the upload suite against libcurl
+  7.19.0 so the feature-specific floor remains real rather than inferred.
 
-- Real HTTP server (Node): Content-Length, chunked, no-Content-Length,
-  redirect (302), ~140 KB of headers — buffered and streaming paths OK.
-- Valgrind: buffered concurrency, buffer-growth path, cancel-heavy streaming,
-  conduit suite, managed (growth/cancel/abandon/start-fail/shrink), full
-  hcurl-test.
-- Soak: suite 16/16 runs (default and `-N1`); 100×16 concurrent requests at
-  `-N4`/`-N1`; 20k sequential requests with flat RSS.
-- Allocation profile: ~3 bytes allocated per body byte streaming; max
-  residency ~2 MB; no red flags.
-
-## Gotchas learned (important for future sessions)
-
-1. **c2hs does not track C header dependencies.** Changing a struct layout in
-   `cbits/*.h` leaves the generated `sizeOf` stale (we saw `sizeOf = 16`
-   while C wrote 24 bytes → heap corruption). After header layout changes run
-   `touch src/HCurl/Internal/Raw/SimpleString.chs` (or clean rebuild). A
-   comment to this effect lives in `SimpleString.chs`.
-2. **Incremental builds produced false crashes/hangs.** Many "regressions"
-   during the session were stale-object artifacts. Always `cabal clean` before
-   judging a change.
-3. **`BodyReader` must be consumed inside its `ResourceT` scope** (or via
-   `withHttpStreaming`). Reading after scope exit returns a deterministic
-   `Left AbortedByCallback`; that is by design.
-4. **`hs_try_putmvar` is asynchronous.** Do not free/reuse the waker stable
-   pointer (see known limitation).
-5. Valgrind/gdb are not in the dev shell; usable store paths:
-   `/nix/store/ad60badgvym8ggmn2yxvqqyf0m3jghlw-valgrind-3.26.0/bin/valgrind`,
-   `/nix/store/p6jfx09kvyy1vyi6m2flsjqcxmbgs16m-gdb-17.2/bin/gdb`.
-
-## Suggested next steps
-
-- Re-run the gates above after any future change.
-- If a "no Content-Length streaming stall" is ever reported against a real
-  server, investigate head publication (currently tied to the first body
-  write); local toy-server reproductions of this were harness artifacts and
-  real-server tests passed.
-- Revisit the waker stable-pointer lifetime only if upstream GHC provides a
-  cleanup API (`hs_try_takemvar`-like) or if the wake channel is redesigned.
+All `HCurl.Internal.*` modules intentionally remain exposed, but top-level
+modules should present the smaller supported interface. `HCurl.Agent` is only
+the abstract façade; reactor internals live in `HCurl.Internal.Agent`.

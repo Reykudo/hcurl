@@ -1,31 +1,28 @@
 #pragma once
 
 #include <curl/curl.h>
-#include <stdatomic.h>
+#include <stddef.h>
+#include <stdint.h>
 
-typedef struct curl_metrics_s {
-    atomic_long upload_progress;
-    atomic_long upload_total;
-    atomic_long download_progress;
-    atomic_long download_total;
+typedef struct curl_metrics_context_s curl_metrics_context_t;
 
-    atomic_long upload_speed;
-    atomic_long download_speed;
+#define HCURL_METRICS_COUNT 13
 
-    atomic_long namelookup_time;
-    atomic_long connect_time;
-    atomic_long appconnect_time;
-    atomic_long pretransfer_time;
-    atomic_long starttransfer_time;
-    atomic_long total_time;
-    atomic_long redirect_time;
-} curl_metrics_t;
+curl_metrics_context_t *curl_metrics_context_create(void);
 
-typedef struct curl_metrics_context_s {
-    CURL *easy;
-    curl_metrics_t metrics;
-} curl_metrics_context_t;
+void curl_metrics_context_destroy(curl_metrics_context_t *context);
 
-int metric_xferinfofun_cb(curl_metrics_context_t *curl_metrics_context, curl_off_t dltotal, curl_off_t dlnow,
-                          curl_off_t ultotal,
-                          curl_off_t ulnow);
+void curl_metrics_streamed_download(curl_metrics_context_t *context);
+
+void curl_metrics_streamed_upload(curl_metrics_context_t *context);
+
+void curl_metrics_add_downloaded(curl_metrics_context_t *context, size_t bytes);
+
+void curl_metrics_add_uploaded(curl_metrics_context_t *context, size_t bytes);
+
+/* Capture values that libcurl only exposes through curl_easy_getinfo.  This
+ * is called once by the agent, immediately before curl_easy_cleanup. */
+void curl_metrics_finish(curl_metrics_context_t *context, CURL *easy);
+
+void curl_metrics_snapshot(const curl_metrics_context_t *context,
+                           int64_t output[HCURL_METRICS_COUNT]);

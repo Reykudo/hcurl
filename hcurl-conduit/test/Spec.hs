@@ -20,8 +20,7 @@ import Data.ByteString.Char8 qualified as BSC
 import Data.Conduit
 import HCurl.Agent
 import HCurl.Conduit qualified as Conduit
-import HCurl.Internal.Metrics (Metrics (..))
-import HCurl.Internal.Raw (CurlCode (..))
+import HCurl.Metrics (Metrics (..))
 import HCurl.Request
 import HCurl.Response
 import HCurl.Simple (httpLBS, initCurl)
@@ -34,14 +33,14 @@ import System.Timeout qualified as Timeout
 main :: IO ()
 main = withSocketsDo do
     initCurl
-    agent <- spawnAgent defaultConfig
-    runTest "buffered response remains compatible" $ testBuffered agent
-    runTest "core exposes the first chunk before EOF" $ testEarlyCoreStreaming agent
-    runTest "bounded core reader pauses and resumes libcurl" $ testBackpressure agent
-    runTest "empty response completes without a body callback" $ testEmptyResponse agent
-    runTest "truncated response reports a late curl error" $ testLateFailure agent
-    runTest "Conduit adapter streams the whole response" $ testConduit agent
-    runTest "Conduit early termination cancels the transfer" $ testConduitCancellation agent
+    withAgent defaultConfig \agent -> do
+        runTest "buffered response remains compatible" $ testBuffered agent
+        runTest "core exposes the first chunk before EOF" $ testEarlyCoreStreaming agent
+        runTest "bounded core reader pauses and resumes libcurl" $ testBackpressure agent
+        runTest "empty response completes without a body callback" $ testEmptyResponse agent
+        runTest "truncated response reports a late curl error" $ testLateFailure agent
+        runTest "Conduit adapter streams the whole response" $ testConduit agent
+        runTest "Conduit early termination cancels the transfer" $ testConduitCancellation agent
 
 runTest :: String -> IO () -> IO ()
 runTest name action = do
@@ -69,7 +68,7 @@ assertBool label condition = unless condition . throwIO $ userError label
 requestFor :: ByteString -> Request
 requestFor url =
     Request
-        { host = url
+        { url
         , timeoutMS = 4_000
         , connectionTimeoutMS = 1_000
         , lowSpeedLimit = LowSpeedLimit{timeout = 0, lowSpeed = 0}
@@ -96,11 +95,11 @@ testEarlyCoreStreaming :: Agent -> IO ()
 testEarlyCoreStreaming agent = do
     releaseTail <- newEmptyMVar
     withServer
-        ( \socket -> do
-            sendHeaders socket "200 OK" 10 []
-            Socket.sendAll socket "first"
+        ( \sock -> do
+            sendHeaders sock "200 OK" 10 []
+            Socket.sendAll sock "first"
             takeMVar releaseTail
-            Socket.sendAll socket "-tail"
+            Socket.sendAll sock "-tail"
         )
         \url ->
             runResourceT do
@@ -118,7 +117,9 @@ testEarlyCoreStreaming agent = do
                         metricsResult <- completion
                         case metricsResult of
                             Left curlCode -> throwIO $ userError ("unexpected completion error: " <> show curlCode)
-                            Right metrics -> assertEqual "download progress" 10 metrics.downloadProgress
+                            Right metrics -> do
+                                assertEqual "download progress" 10 metrics.downloadProgress
+                                assertEqual "download total" 10 metrics.downloadTotal
 
 testBackpressure :: Agent -> IO ()
 testBackpressure agent = do
@@ -152,9 +153,9 @@ testEmptyResponse agent =
 testLateFailure :: Agent -> IO ()
 testLateFailure agent =
     withServer
-        ( \socket -> do
-            sendHeaders socket "200 OK" 10 []
-            Socket.sendAll socket "short"
+        ( \sock -> do
+            sendHeaders sock "200 OK" 10 []
+            Socket.sendAll sock "short"
         )
         \url ->
             runResourceT do
@@ -184,10 +185,10 @@ testConduit agent =
 testConduitCancellation :: Agent -> IO ()
 testConduitCancellation agent =
     withServer
-        ( \socket -> do
-            sendHeaders socket "200 OK" 1_000_000 []
-            Socket.sendAll socket "first"
-            let loop = threadDelay 20_000 >> Socket.sendAll socket "more" >> loop
+        ( \sock -> do
+            sendHeaders sock "200 OK" 1_000_000 []
+            Socket.sendAll sock "first"
+            let loop = threadDelay 20_000 >> Socket.sendAll sock "more" >> loop
             void (try @SomeException loop)
         )
         \url ->
@@ -243,24 +244,24 @@ stopServer :: Async () -> IO ()
 stopServer server = cancel server >> void (waitCatch server)
 
 receiveRequest :: Socket -> IO ()
-receiveRequest socket = go ""
+receiveRequest sock = go ""
   where
     go received
         | "\r\n\r\n" `BS.isInfixOf` received = pure ()
         | otherwise = do
-            chunk <- Socket.recv socket 4_096
+            chunk <- Socket.recv sock 4_096
             if BS.null chunk
                 then throwIO $ userError "client closed before sending request headers"
                 else go $ received <> chunk
 
 sendFixedResponse :: ByteString -> [(ByteString, ByteString)] -> ByteString -> Socket -> IO ()
-sendFixedResponse status extraHeaders responseBody socket = do
-    sendHeaders socket status (BS.length responseBody) extraHeaders
-    Socket.sendAll socket responseBody
+sendFixedResponse status extraHeaders responseBody sock = do
+    sendHeaders sock status (BS.length responseBody) extraHeaders
+    Socket.sendAll sock responseBody
 
 sendHeaders :: Socket -> ByteString -> Int -> [(ByteString, ByteString)] -> IO ()
-sendHeaders socket status contentLength extraHeaders =
-    Socket.sendAll socket . BS.concat $
+sendHeaders sock status contentLength extraHeaders =
+    Socket.sendAll sock . BS.concat $
         [ "HTTP/1.1 "
         , status
         , "\r\nContent-Length: "

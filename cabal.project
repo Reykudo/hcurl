@@ -1,5 +1,3 @@
 packages:
   .
   hcurl-conduit
-
-optimization: 0

@@ -1,64 +1,72 @@
-{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE CApiFFI #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE QuasiQuotes #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeFamilyDependencies #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
-{-# OPTIONS_GHC -lcurl #-}
 
-module HCurl.Internal.Options (module HCurl.Internal.Options, module HCurl.Internal.Options.Class) where
+module HCurl.Internal.Options (
+    module HCurl.Internal.Options.Class,
+    module HCurl.Options,
+    setSomeOption,
+) where
 
-import Control.DeepSeq
-import Data.Singletons
+import Control.Exception (throwIO)
+import Control.Monad (unless, when)
+import Data.ByteString qualified as BS
+import Foreign.C.Types (CInt, CLong)
+import Foreign.Ptr (Ptr)
 import HCurl.Internal.Options.Class
-import HCurl.Internal.Options.TH
 import HCurl.Internal.Raw.Curl
+import HCurl.Internal.Raw.CurlFunctions (
+    hcurl_easy_setopt_long,
+    hcurl_easy_setopt_string,
+ )
+import HCurl.Internal.Raw.Options
+import HCurl.Options
 
-data SomeOption where
-    SomeOption' :: (SingI opt, EasyOption opt) => !(EasyOption' opt) -> SomeOption
+setSomeOption :: Ptr CurlEasy -> SomeOption -> IO ()
+setSomeOption easyPtr = \case
+    OptionHttpVersion version ->
+        setLong InternalOptionHttpVersion $ fromIntegral (httpVersionValue version)
+    OptionPipeWait value -> setBool InternalOptionPipeWait value
+    OptionFollowLocation value -> setBool InternalOptionFollowLocation value
+    OptionNoSignal value -> setBool InternalOptionNoSignal value
+    OptionSslVerifyPeer value -> setBool InternalOptionSslVerifyPeer value
+    OptionTcpFastOpen value -> setBool InternalOptionTcpFastOpen value
+    OptionTcpKeepAlive value -> setBool InternalOptionTcpKeepAlive value
+    OptionTimeoutMs value -> setInt "timeout" InternalOptionTimeoutMs value
+    OptionConnectTimeoutMs value -> setInt "connect timeout" InternalOptionConnectTimeoutMs value
+    OptionLowSpeedTime value -> setInt "low speed time" InternalOptionLowSpeedTime value
+    OptionLowSpeedLimit value -> setInt "low speed limit" InternalOptionLowSpeedLimit value
+    OptionAcceptEncoding value -> setString "accept encoding" InternalOptionAcceptEncoding value
+    OptionIpResolve value -> setLong InternalOptionIpResolve $ fromIntegral (fromEnum value)
+    OptionSslVerifyHost value ->
+        setLong InternalOptionSslVerifyHost $ if value then 2 else 0
+  where
+    tagValue = fromIntegral . fromEnum
 
-instance NFData SomeOption where
-    rnf = rwhnf
+    setBool tag value = setLong tag $ if value then 1 else 0
 
-newtype EasyOption' (opt :: CurlOption) = EasyOption' (CurlParamBaseType opt)
+    setInt name tag value = do
+        let integerValue = toInteger value
+        when (integerValue < 0) $
+            throwIO $
+                OptionIntegerIsNegative name integerValue
+        when
+            (integerValue > toInteger (maxBound :: CLong))
+            $ throwIO
+            $ OptionIntegerOutOfRange name integerValue
+        setLong tag $ fromIntegral value
 
-instance (SingI opt, EasyOption opt) => EasyOption (EasyOption' opt) where
-    type CurlParamBaseType (EasyOption' opt) = EasyOption' opt
-    setEasyOption easyPtr (EasyOption' smth) = setEasyOption @opt easyPtr smth
-    {-# INLINE setEasyOption #-}
+    setLong tag value = do
+        code <- hcurl_easy_setopt_long easyPtr (tagValue tag) value
+        checkCode code
 
-genEasyOptionEnumInstances
-    [ (''HTTPVersion, 'EasyHttpVersion)
-    ]
+    setString name tag value = do
+        when (BS.elem 0 value) $ throwIO $ OptionStringContainsNul name
+        when (BS.elem 10 value || BS.elem 13 value) $
+            throwIO $
+                OptionStringContainsNewline name
+        BS.useAsCString value \valuePtr -> do
+            code <- hcurl_easy_setopt_string easyPtr (tagValue tag) valuePtr
+            checkCode code
 
-genEasyOptionBoolInstances
-    [ 'EasyHttpget
-    , 'EasyNobody
-    , 'EasyPost
-    , 'EasyPipewait
-    , 'EasyFollowlocation
-    , 'EasyNosignal
-    , 'EasyNoprogress
-    , 'EasyIpresolve
-    , 'EasySslVerifypeer
-    , 'EasySslVerifyhost
-    , 'EasyTcpFastopen
-    , 'EasyTcpKeepalive
-    ]
-
-genEasyOptionLongInstances
-    [ 'EasyTimeoutMs
-    , 'EasyConnecttimeoutMs
-    , 'EasyLowSpeedTime
-    , 'EasyLowSpeedLimit
-    , 'EasyPostfieldsize
-    ]
-
-genEasyOptionStringInstances
-    [ 'EasyUrl
-    , 'EasyAcceptEncoding
-    , 'EasyPostfields
-    , 'EasyCopypostfields
-    ]
+    checkCode :: CInt -> IO ()
+    checkCode code =
+        unless (code == 0) $ throwIO (toEnum (fromIntegral code) :: CurlCode)

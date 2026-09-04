@@ -15,21 +15,13 @@ main = do
                 , maxConnectionPerHost = 100
                 , maxConnection = 1000
                 }
-    agent <- Agent.spawnAgent conf
-
-    resp <- runResourceT $ httpLBS agent hcurlGetRequest
-
-    print resp
+    Agent.withAgent conf \agent -> do
+        resp <- runResourceT $ httpLBS agent hcurlGetRequest
+        print resp
 
 hcurlGetRequest :: Request
 hcurlGetRequest =
-    Request
-        { host = "https://example.com/"
-        , timeoutMS = 0
-        , connectionTimeoutMS = 1000
+    (defaultRequest "https://example.com/")
+        { connectionTimeoutMS = 1000
         , lowSpeedLimit = LowSpeedLimit{timeout = 1, lowSpeed = 1}
-        , Request.body = Empty
-        , Request.headers = NoHeaders
-        , extraOptions = []
-        , method = Get
         }

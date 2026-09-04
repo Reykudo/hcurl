@@ -4,5 +4,5 @@ module HCurl.Internal.Raw.Metrics where
 
 {# pointer *curl_metrics_context_t as CurlMetricsContext foreign newtype #}
 
-curlMetricsSize :: Int
-curlMetricsSize = {#sizeof curl_metrics_context_t#}
+rawMetricsCount :: Int
+rawMetricsCount = {#const HCURL_METRICS_COUNT#}

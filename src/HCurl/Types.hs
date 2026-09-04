@@ -1,8 +1,17 @@
-module HCurl.Types where
+module HCurl.Types (
+    AgentConfig (..),
+    Body (..),
+    CurlCode (..),
+    HTTPMethod (..),
+    HTTPVersion (..),
+    defaultConfig,
+    httpMethodToBS,
+) where
 
 import Control.DeepSeq
 import Data.ByteString
 import GHC.Generics
+import HCurl.Internal.Raw.Curl (CurlCode (..), HTTPVersion (..))
 import Numeric.Natural
 
 data Body where
@@ -12,8 +21,15 @@ data Body where
     deriving (Generic)
     deriving anyclass (NFData)
 
-data HTTPMethod = Get | Head | Post | Put | Delete
-    deriving (Generic)
+data HTTPMethod
+    = Get
+    | Head
+    | Post
+    | Put
+    | Delete
+    | Patch
+    | Custom !ByteString
+    deriving (Show, Eq, Ord, Generic)
     deriving anyclass (NFData)
 
 httpMethodToBS :: HTTPMethod -> ByteString
@@ -23,6 +39,8 @@ httpMethodToBS = \case
     Post -> "POST"
     Put -> "PUT"
     Delete -> "DELETE"
+    Patch -> "PATCH"
+    Custom method -> method
 
 data AgentConfig = AgentConfig
     { maxConnection :: !Natural
